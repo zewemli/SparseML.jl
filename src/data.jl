@@ -1,5 +1,8 @@
 module Data
 
+# needed for the cdf function
+using Distributions
+
 typealias Value (Int64,Float64)
 
 type Row
@@ -18,7 +21,7 @@ type DataStats
     nUnique::Int64
 end
 
-function arffParse(line::ASCIIString, classMap::Dict{ASCIIString,Int64}, classID::Int64)
+function arffParse(line::ASCIIString, classMap::Dict{ASCIIString,Int64})
 
     row = Row(IntSet(), 0, [])
 
@@ -37,13 +40,7 @@ function arffParse(line::ASCIIString, classMap::Dict{ASCIIString,Int64}, classID
                 # the end-2 part skips the new line and the final "}"
                 kVal = line[kmid+1 : end-2]
             end
-            
-            if kID == classID
-                push!(row.labels, get!(classMap, kVal, length(classMap)+1))
-            else
-                push!(row.values, (kID+1, parsefloat(kVal)))
-            end
-            
+            push!(row.values, (kID+1, parsefloat(kVal)))
             kstart = knext
         end
     
@@ -68,18 +65,19 @@ function arffParse(line::ASCIIString, classMap::Dict{ASCIIString,Int64}, classID
     return row
 end
 
-function svmlightParse(line::ASCIIString)
+function svmlightParse(line::ASCIIString, nClasses::Int64)
     row = Row(IntSet(),0,[])
     featStart = rsearchindex(line, " ", searchindex(line, ":"))
-    # Get features
-    for l in split(line[1:featStart-1], ",")
+    # Get labels
+    for l in split(strip(line[1:featStart-1]), " ")
         try
             lInt = parseint(l)
             if lInt != 0
+                lInt = lInt < 0 ? nClasses + lInt + 1 : lInt
                 push!(row.labels, lInt)
             end
-        catch
-            
+        catch y
+            println(y,":",l,"|")
         end
     end
     
@@ -110,7 +108,7 @@ function svmlightParse(line::ASCIIString)
     return row
 end
 
-function svmlightNext(stream::IOStream)
+function svmlightNext(stream::IOStream, nClasses::Int64)
     line = readline(stream)
     # Skip comments
     while !eof(stream) && ((length(line) == 0) || (line[1] == '#'))
@@ -120,11 +118,11 @@ function svmlightNext(stream::IOStream)
     if length(line)==0
         return Nothing()
     else
-        return svmlightParse(line)
+        return svmlightParse(line, nClasses)
     end
 end
 
-function arffNext(stream::IOStream, classMap::Dict{ASCIIString,Int64}, classID::Int64)
+function arffNext(stream::IOStream, classMap::Dict{ASCIIString,Int64})
     line = readline(stream)
     # Skip comments
     while !eof(stream) && ((length(line) == 0) || (line[1] == '%'))
@@ -134,19 +132,19 @@ function arffNext(stream::IOStream, classMap::Dict{ASCIIString,Int64}, classID::
     if length(line)==0
         return Nothing()
     else
-        return arffParse(line, classMap, classID)
+        return arffParse(line, classMap)
     end
 end
 
-function svmlightIter(stream::IOStream, closeOnEnd::Bool)
+function svmlightIter(stream::IOStream, nClasses::Int64, closeOnEnd::Bool)
     rownumber=1
     ptime = time()
-    row = svmlightNext(stream)
+    row = svmlightNext(stream, nClasses)
     while row != nothing
         
         produce( row )
         try
-            row = svmlightNext(stream)
+            row = svmlightNext(stream, nClasses)
             rownumber+=1
         catch y
             write(STDERR, string(rownumber,": exception", y,"\n"))    
@@ -188,9 +186,12 @@ function arffIter(stream::IOStream, closeOnEnd::Bool)
     end
 end
 
-
 function readsparse(stream::IOStream)
-    @task svmlightIter(stream, false)
+    @task svmlightIter(stream, 0, false)
+end
+
+function readsparse(stream::IOStream, nClasses::Int64)
+    @task svmlightIter(stream, nClasses, false)
 end
 
 function readsparse(path::String)
@@ -205,15 +206,32 @@ function readsparse(path::String)
     end
 end
 
-function readsparse(stream::IOStream, classMap::Dict{ASCIIString,Int64}, classID::Int64)
-    @task arffIter(stream, classMap, classID)
+function readsparse(stream::IOStream, classMap::Dict{ASCIIString,Int64})
+    @task arffIter(stream, classMap)
+end
+
+function writesparse(rows::Task, stream::IOStream)
+
+    for row in rows
+        write(stream, join(row.labels, " "))
+        if row.qid != 0
+            q = row.qid
+            write(stream, " qid:$q")
+        end
+        
+        for (i,v) in row.values
+            write(stream, string(" ",i,":",convert(Int64, v)))
+        end
+        write(stream, "\n")
+    end
+
 end
 
 function getStats(stream::Task)
     classes = IntSet()
     features = IntSet()
     vals = Set{Float64}()
-    minVal = Inf
+    minVal = 0 # <- 0 is the missing value, so just assume it was in there...
     maxVal = -Inf
     nvals = 0
     nrows = 0
@@ -228,6 +246,7 @@ function getStats(stream::Task)
             nvals += 1
         end
     end
+    
     DataStats(length(classes), maximum(features), maxVal, minVal, nvals/(maximum(features) * nrows), nrows, length(vals))
 end
 
@@ -245,32 +264,22 @@ function getStats(path::ASCIIString)
     return stats
 end
 
-# Basic threshold
-function discretizer(stream::Task, threshold::Float64)
-    for r in stream
-        vals = Value[]
-        
-        for v in r.values
-            if v[2] > threshold
-                push!(vals, (v[1],1.0))
-            end
-        end
-        
-        produce( Row(r.labels, r.qid, vals) ) 
-    end
-end
-
 # Equal width bins
-function discretizer(stream::Task, low::Float64, high::Float64, bins::Int64)
+function discretizer(stream::Task, limits::Array{Float64,2}, bins::Int64)
 
-    mult = (bins-1)/(high - low)
+    mult = [ (1/(limits[i,2] - limits[i,1]))*bins for i=1:size(limits,1) ]
 
     for r in stream
         vals = Value[]
         
         for v in r.values
-            if v[2] > low
-                push!(vals, (v[1], 1+floor(clamp((v[2] - low) * mult, 0, bins)) + 1) )
+            lv = clamp(floor(( v[2] - limits[v[1],1] ) * mult[ v[1] ])+1, 1, bins)
+            kvalue = (v[1]-1)*bins + lv
+            
+            if isfinite(kvalue)
+                push!(vals, (convert(Int64, kvalue), 1,))
+            else
+                push!(vals, (convert(Int64, (v[1]-1)*bins + 1), 1,))
             end
         end
         
@@ -280,81 +289,26 @@ function discretizer(stream::Task, low::Float64, high::Float64, bins::Int64)
 end
 
 # Threshold with cdf function
-function discretizer(stream::Task, dist, threshold::Float64, bins::Int64)
-    
-    mult = bins/(1 - threshold)
+function discretizer(stream::Task, dist::Vector{Any}, bins::Int64)
     
     for r in stream
         vals = Value[]
         
         for v in r.values
-            vprob = cdf(dist, v[2])
-            if vprob > threshold
-                push!(vals, (v[1], 1+floor((vprob-threshold)* mult)))
+            dv = dist[ v[1] ]
+            lv = 1
+            if typeof(dv) == Dict{Float64,Int64}
+                # All unobserved values get put into bin 0
+                lv = get!(dv, v[2], 0)
+            else
+                lv = clamp(floor(cdf(dv, v[2]) * bins) + 1, 1, bins)
             end
+            push!(vals, (convert(Int64, (v[1]-1)*bins + lv), 1))
         end
         
         produce( Row(r.labels, r.qid, vals) ) 
     end
 end
 
-function discretizer(args::Dict)
-
-    if args["estdata"] == nothing || !isreadable(args["estdata"])
-    
-        if args["threshold"] == nothing
-            return (s) -> s
-        else
-            return (s) -> @task discretizer(s, args["threshold"])
-        end
-        
-    else
-        
-        if args["cdfpath"] != nothing && isreadable(args["cdfpath"])
-            
-            f = open(args["cdfpath"], "r")
-            dfit = deserialize(f)
-            close(f)
-            return (s) -> @task discretizer(s, dfit, args["threshold"], args["bins"])
-        
-        else
-            write(STDERR, "Reading data for discretization estimate ... ")
-            allVals = Float64[]
-            
-            estf = open(args["estdata"], "r")
-            for row in SparseData.readsparse(estf)
-                for v in row.values
-                    push!(allVals, v[2])
-                end
-            end
-            close(estf)
-            write(STDERR, "done!\n")
-            
-            if args["cdf"] == nothing
-
-                sort!(allVals)
-                return (s) -> @task discretizer(s, max(allVals[1], args["threshold"]), allVals[end], args["bins"])
-            
-            else
-                write(STDERR, string("\tfitting to ",args["cdf"], " distribution\n"))
-                d = eval(symbol(args["cdf"]))
-                dfit = fit_mle(d, allVals)
-                if args["threshold"] == nothing
-                    args["threshold"] = 0.5
-                end
-
-                if args["cdfpath"] != nothing
-                    f = open(args["cdfpath"], "w")
-                    serialize(f, dfit)
-                    close(f)
-                end
-                
-                return (s) -> @task discretizer(s, dfit, args["threshold"], args["bins"])
-            end
-                
-        end
-    end
-end
-
-export discretizer, readsparse, Row, Value, DataStats, getStats
+export discretizer, readsparse, writesparse, Row, Value, DataStats, getStats
 end # module

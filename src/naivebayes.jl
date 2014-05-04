@@ -1,12 +1,12 @@
 module NaiveBayes
 
-include("data.jl")
-include("model.jl")
+import ..Model
 
-function setProb!(features::Vector{Int64}, conditional::SparseMatrixCSC{Float64,Int64}, probs::Vector{Float64})
-    for c=1:length(m.pclass)
+function setProb!(features::Vector{Int64}, conditional::SparseMatrixCSC{Float64,Int64}, pMin::Float64, probs::Vector{Float64})
+    for c=1:size(probs,1)
         for j in features
-            probs[c] += conditional[c,j]
+            cj = conditional[c,j]
+            probs[c] += cj == 0 ? pMin : cj
         end
     end
     return probs
@@ -14,26 +14,23 @@ end
 
 function predictIter(rows::Task, model::Model.Probability, ignoreClass::Bool, n::Int64, p::Float64)
 
-    conditionalGain = spzeros( size(model.prob,1), size(model.prob,2) ) 
-    priors = ignoreClass ? zeros( size(model.pclass) ) : map(log, model.pclass) 
-    rowprob = zeros( size(model.pclass) )
-    
+    conditional = spzeros( size(model.prob,1), size(model.prob,2) ) 
+    rowProb = zeros( size(model.pclass) )
+    priors = ignoreClass ? zeros( size(model.pclass) ) : map(log, model.pclass)
+    pMin = log(model.pMin)
     pEmpty = zeros( size(model.pclass) )
-    pNotFeat = map(log, .-(1, model.pfeature) )
-    featGain = [ log(v) - log(1-v) for v in model.pfeature ]
-    pNoFeats = sum(pNotFeat)
     
     I,J,V = findnz(model.prob)
-    for (i,j,v) in zip(I,J,V)
-        p_ij = v / model.n
-        p_neg = log(1 - p_ij)
-        pEmpty[i] += p_neg
-        conditionalGain[i,j] = log(p_ij) - p_neg
+    
+    for (c, f, p_f_given_c) in zip(I,J,V)
+        p_neg = log(1 - p_f_given_c)
+        pEmpty[c] += p_neg
+        conditional[c,f] = log(p_f_given_c) - p_neg
     end
     
+    # add in pEmpty to precompute if all features == 0
     priors = .+(priors, pEmpty)
-    pNone = sum( pNotFeat )
-
+    
     start = time()
     i = 0
     rownumber=0
@@ -43,25 +40,15 @@ function predictIter(rows::Task, model::Model.Probability, ignoreClass::Bool, n:
         i+=1
         
         # Initialize the probabilities
-        rowprob[1:end] = priors
-        features = [ project(V, model.nBins) for V in row.values ]
+        rowProb[1:end] = priors
         
-        pdata = pNoFeats
-        for f in features
-            pdata += featGain[f]
-        end
+        features = [ Model.project(V, model.nBins) for V in row.values ]
         
-        setProb!(row.values, conditionalGain, rowprob)
-        
-        for i=1:length(pdata)
-            rowprob[i] -= pdata[i]
-            assert(0 <= rowprob[i] <= 1)
-        end
+        setProb!(features, conditional, pMin, rowProb)
         
         if p > 0 || n > 1
         
-            #czipped = collect(zip( ./(prob, sum(prob)) , model.classID))
-            czipped = collect(zip(rowprob, model.classID))
+            czipped = collect(zip(./(rowProb,abs(maximum(rowProb))), 1:length(rowProb)))
             
             sort!(czipped, rev=true)
             if 0 < p < 1
@@ -82,13 +69,13 @@ function predictIter(rows::Task, model::Model.Probability, ignoreClass::Bool, n:
         else
             pMax = -Inf
             cMax = 0
-            for c=1:length(prob)
-                if rowprob[c] > pMax
-                    pMax = rowprob[c]
+            for c=1:length(rowProb)
+                if rowProb[c] > pMax
+                    pMax = rowProb[c]
                     cMax = c
                 end
             end
-            produce( (row.labels, (pMax, model.classID[cMax])) )
+            produce( (row.labels, (pMax, cMax)) )
         end
         
         if i == 1000
@@ -100,15 +87,15 @@ function predictIter(rows::Task, model::Model.Probability, ignoreClass::Bool, n:
 end
 
 function predict(rows::Task, model::Model.Counting, ignoreClass::Bool, n::Int64, p::Float64)
-    @task predictIter(rows, countsToPredModel(model), ignoreClass, min(n, length(model.classcount)), p)
+    @task predictIter(rows, Model.probModel(model), ignoreClass, min(n, length(model.classcount)), p)
 end
 
 function predict(rows::Task, model::Model.Counting, ignoreClass::Bool, n::Int64)
-    @task predictIter(rows, countsToPredModel(model), ignoreClass, min(n, length(model.classcount)), 0)
+    @task predictIter(rows, Model.probModel(model), ignoreClass, min(n, length(model.classcount)), 0)
 end
 
 function predict(rows::Task, model::Model.Counting, ignoreClass::Bool, p::Float64)
-    @task predictIter(rows, countsToPredModel(model), ignoreClass, 0, p)
+    @task predictIter(rows, Model.probModel(model), ignoreClass, 0, p)
 end
 
 function predWriter(predTask::Task, output::IOStream, n::Int64)
