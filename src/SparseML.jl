@@ -13,7 +13,7 @@ include("naivebayes.jl")
 include("knn.jl")
 include("vfdt.jl")
 
-MLModel = Union(VFDT.HoeffdingTree, NaiveBayes.NB, KNN.Subset)
+MLModel = Union(Type{VFDT.HoeffdingTree}, Type{NaiveBayes.NB}, Type{KNN.Subset})
 
 function load(path::String)
     open(path) do f
@@ -30,19 +30,19 @@ end
 #
 #   To train a model we need a model type and labelled data
 #
-function train(model::String, params::Dict, data::Data.Dataset)
+function train(model::String, params::Dict{Any,Any}, data::Data.Dataset)
     train(load(model), params, data)
 end
 
-function train(modelType::MLModel, params::Dict, data::Data.Dataset)
-    train(modelType(shape, params::Dict), data)
+function train(modelType::MLModel, params::Dict{Any,Any}, data::Data.Dataset)
+    train(modelType(data.shape, params), data)
 end
 
-function label(model::String, params::Dict, stream::Task)
+function label(model::String, params::Dict{Any,Any}, stream::Task)
     @task label(load(model), params, stream)
 end
 
-function label(model::MLModel, params::Dict, stream::Task)
+function label(model::MLModel, params::Dict{Any,Any}, stream::Task)
     @task label(model, params, stream)
 end
 
@@ -51,7 +51,7 @@ function train(model::VFDT.HoeffdingTree, data::Data.Dataset)
     VFDT.train(model, data)
 end
 
-function label(model::VFDT.HoeffdingTree, params::Dict, stream::Task)
+function label(model::VFDT.HoeffdingTree, params::Dict{Any,Any}, stream::Task)
     @task VFDT.label(model, params, stream)
 end
 
@@ -60,7 +60,7 @@ function train(model::NaiveBayes.NB, data::Data.Dataset)
     NaiveBayes.train(model, data)
 end
 
-function label(model::NaiveBayes.NB, params::Dict, stream::Task)
+function label(model::NaiveBayes.NB, params::Dict{Any,Any}, stream::Task)
     @task NaiveBayes.label(model, params, stream)
 end
 
@@ -69,7 +69,7 @@ function train(model::KNN.Subset, data::Data.Dataset)
     KNN.train(model, data)
 end
 
-function label(model::KNN.Subset, params::Dict, stream::Task)
+function label(model::KNN.Subset, params::Dict{Any,Any}, stream::Task)
     @task KNN.label(model, params, stream)
 end
 

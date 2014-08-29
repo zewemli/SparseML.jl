@@ -36,9 +36,11 @@ type Probability
     pfeature::Vector{Float64}
     nBins::Int64
     pMin::Float64
-    
+
     function Probability(m::Counting)
-    
+        extraN = estExtra(m)
+        pMin = estPMin(m, extraN)
+
         prob = new( spzeros( size(m.overlap,1), size(m.overlap, 2) ),
                     spzeros( size(m.featureoverlap,1), size(m.featureoverlap,2) ),
                     spzeros( size(m.classoverlap,1), size(m.classoverlap,2) ),
@@ -46,31 +48,32 @@ type Probability
                     zeros( size(m.featurecount) ),
                     m.nBins,
                     pMin )
-        
+
         if m.n > 0
             I,J,V = findnz(m.overlap)
-            extraN = estExtra(m)
-        
-            pMin = estPMin(m, extraN)
-        
+
             prob.pclass = ./(m.classcount, m.n)
             prob.pfeature = ./(m.featurecount, m.n)
-        
+
             for (c, f, f_and_c) in zip(I,J,V)
-                prob.prob[ c,f ] = f_and_c / (m.classcount[c] + extraN*pmodel.pclass[c])
+              cf_val = f_and_c / (m.classcount[c] + extraN*prob.pclass[c])
+              prob.prob[ c,f ] = isfinite(cf_val) ? cf_val : 0
             end
-        
+
             I,J,V = findnz(m.featureoverlap)
             for (i,j,v) in zip(I,J,V)
-                prob.poverlap[ i,j ] = v / (m.featurecount[i] + m.featurecount[j])
+              ij_val = v / (m.featurecount[i] + m.featurecount[j])
+              prob.poverlap[ i,j ] = isfinite(ij_val) ? ij_val : 0
             end
-        
+
             I,J,V = findnz(m.classoverlap)
             for (i,j,v) in zip(I,J,V)
-                prob.pclassoverlap[ i,j ] = v / (m.classcount[i] + m.classcount[j])
+              ijv = v / (m.classcount[i] + m.classcount[j])
+              prob.pclassoverlap[ i,j ] = isfinite(ijv) ? ijv : 0
             end
+
         end
-        
+
         return prob
     end
 
@@ -79,28 +82,29 @@ end
 # Estimate the number of examples we would need
 # to achieve full density
 function estExtra( model::Counting )
-    log(2, model.n) * (length(model.overlap) - nfilled(model.overlap))
+    log(2, model.n) * (length(model.overlap) - nnz(model.overlap))
 end
 
-function estPMin( model::Counting, extra::Int64 )
-    1 / (model.n + extraN)
+function estPMin( model::Counting, extra::Float64 )
+    1 / (model.n + extra)
 end
 
 function update( attrs::IntSet, pmodel::Probability, model::Counting )
-    nclasses = size(model.classcount)
-    nfeatures = size(model.featurecount)
+    nclasses = length(model.classcount)
+    nfeatures = length(model.featurecount)
 
     pmodel.pclass = ./(model.classcount, model.n)
     pmodel.pfeature = ./(model.featurecount, model.n)
 
-    checkOverlap = nfilled(model.featureoverlap) > 0
+    checkOverlap = nnz(model.featureoverlap) > 0
     extraN = estExtra( model )
 
     for a in attrs
 
         pmodel.pfeature[a] = model.featurecount[a] / model.n
         for c=1:nclasses
-            pmodel.prob[ c, a ] = model.overlap[c,a] / (model.classcount[c] + extraN*pmodel.pclass[c])
+            ca = model.overlap[c,a] / (model.classcount[c] + extraN*pmodel.pclass[c])
+            pmodel.prob[ c, a ] = isfinite(ca) ? ca : 0
         end
 
         for a2=1:nfeatures
@@ -108,9 +112,9 @@ function update( attrs::IntSet, pmodel::Probability, model::Counting )
             if a != a2 && overlap > 0
                 newProb = overlap / (model.featurecount[a] + model.featurecount[a2])
                 if a < a2
-                    pmodel.poverlap[ a,a2 ] = newProb
+                    pmodel.poverlap[ a,a2 ] = isfinite(newProb) ? newProb : 0
                 else
-                    pmodel.poverlap[ a2,a ] = newProb
+                    pmodel.poverlap[ a2,a ] = isfinite(newProb) ? newProb : 0
                 end
             end
         end
@@ -118,7 +122,8 @@ function update( attrs::IntSet, pmodel::Probability, model::Counting )
 
     I,J,V = findnz(model.classoverlap)
     for (i,j,v) in zip(I,J,V)
-        pmodel.pclassoverlap[ i,j ] = v / (model.classcount[i] + model.classcount[j])
+        ij = v / (model.classcount[i] + model.classcount[j])
+        pmodel.pclassoverlap[ i,j ] = isfinite(ij) ? ij : 0
     end
 end
 
@@ -131,8 +136,8 @@ function project(sv::Data.Value, row::Data.Row)
 end
 
 function project!(r::Data.Row, v::Vector{Float64}, nBins::Int64)
-    for v in r.values
-        v[project(v, r)] = 1
+    for val in r.values
+        v[ project(val, r) ] = 1
     end
 end
 

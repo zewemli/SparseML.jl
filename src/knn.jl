@@ -16,7 +16,7 @@ type Params
     k::Int64
     kMetric::Float64
     destPath::String
-    
+
     Params(params::Dict) = new( get(params,"k",1),
                                 get(params,"kMetric",1),
                                 get(params, "dest", "") )
@@ -28,7 +28,7 @@ type Subset
     subset::Vector{Data.Row}
     stage::Int64
     params::Params
-    Subset(shape::Data.Shape, params::Dict) = 
+    Subset(shape::Data.Shape, params::Dict) =
         new(Model.Counting(shape),
               Model.Counting(shape),
               [],
@@ -143,7 +143,7 @@ function getDist(a::Data.Row,
 end
 
 #
-# Recursively finds the boundry between items 
+# Recursively finds the boundry between items
 # which are > v and those which are not...
 #
 function find(values::Vector{Float64}, v::Float64, first::Int64, last::Int64)
@@ -159,7 +159,7 @@ function find(values::Vector{Float64}, v::Float64, first::Int64, last::Int64)
     else
       return find(values, v, mid, last)
     end
-    
+
   end
 
 end
@@ -193,7 +193,7 @@ function train(model::Subset, data::Data.Dataset)
       countRow(SDelta[i], model::subsetcount)
       push!(S, SDelta[i])
     end
-    
+
     sort!(model.subset, by=(x)-> dist(center, x, model.params.k))
 
     prevSDelta = Data.Row[]
@@ -252,14 +252,14 @@ function label(model::Subset, params::Dict, stream::Task)
   for r in stream
     neigh = Common.TopKQueue(>, model.params.k)
     distCenter = Measures.dist(center, r, model.params.k)
-    produce( 
-        labelNN(r, 
-            getNN(r, 
+    produce(
+        (labelNN(r,
+            getNN(r,
                 model.subset,
                 find(subdist, distCenter/2), # low end
                 find(subdist, distCenter*2), # high end
                 neigh,
-                model.params.kMetric)))
+                model.params.kMetric)),r.labels))
   end
 
     return model

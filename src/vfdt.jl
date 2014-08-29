@@ -3,10 +3,11 @@ module VFDT
 import ..Common
 import ..Data
 import ..Model
-import ..Measures
+import ..Measures: gain, gini
 import ..NaiveBayes
 
 type TreeNode
+    isNull::Bool
     isLeaf::Bool
     attr::Int64
     epsilon::Float64
@@ -17,32 +18,50 @@ type TreeNode
     m::Model.Counting
     p::Model.Probability
     nb::NaiveBayes.NBPredModel
-    
+
     depth::Int64
     height::Int64
     label::Int64
     ttl::Int64
-    
+
     updatedAttrs::IntSet
     ranks::Vector{Common.Ranking}
-    
-    TreeNode(parent::TreeNode, shape::Data.Shape) = new(true,
-                -1, 
-                nothing,
-                nothing, 
-                parent,
-                shape,
-                Model.Counting(shape),
-                nothing,
-                nothing,
-                0,
-                0,
-                0,
-                0,
-                IntSet(),
-                nothing)
-    
-    TreeNode(shape::Data.Shape) = TreeNode(nothing, shape)
+
+    function TreeNode()
+      self = new()
+      self.isNull = true
+      self.depth=0
+      self.height=0
+      return self
+    end
+
+    TreeNode(shape::Data.Shape) = TreeNode(TreeNode(), shape)
+
+    function TreeNode(parent::TreeNode, shape::Data.Shape)
+
+        self = TreeNode()
+        self.isNull = false
+        self.isLeaf = true
+        self.attr = -1
+        self.epsilon = 0
+        self.low = TreeNode()
+        self.high = TreeNode()
+        self.parent = parent
+        self.datashape = shape
+        self.m = Model.Counting(shape)
+        self.p = Model.Probability(self.m)
+        self.nb = NaiveBayes.NBPredModel( self.p, false )
+
+        self.depth = parent.depth + 1
+        self.height = 0
+        self.label = 0
+        self.ttl = 0
+
+        self.updatedAttrs = IntSet()
+        self.ranks = Vector{Common.Ranking}[]
+
+        return self
+      end
 end
 
 typealias NodeQueue Collections.PriorityQueue{TreeNode, Float64}
@@ -53,12 +72,10 @@ type Params
     tieLimit::Float64
     maxDepth::Int64
     G::Function
-    
+
     function Params(params::Dict)
-        
-        gname = get(params,"measure","gain")
-        G = eval(symbol("Measures.$(gname)"))
-        
+        G = eval( symbol( get(params,"measure","gain") ) )
+
         new(
             get(params,"ttl",200),
             get(params,"delta",0.005),
@@ -88,7 +105,7 @@ function nodeLabel(node)
 end
 
 function visitParents(node::TreeNode)
-    if node.parent != nothing
+    if !node.parent.isNull
         produce(node.parent)
         visitParents(node.parent)
     end
@@ -132,9 +149,9 @@ function sortToLeaf(node, vec)
     if node.isLeaf
         return node
     else
-        assert(node.low != nothing)
-        assert(node.high != nothing)
-        
+        assert(!node.low.isNull)
+        assert(!node.high.isNull)
+
         if vec[node.attr] == 0.0
             return sortToLeaf(node.low,  vec)
         else
@@ -146,7 +163,7 @@ end
 function prevAttrs(node::TreeNode)
     r = IntSet()
     p = node.parent
-    while p != nothing
+    while !p.isNull
         push!(r, p.attr)
         p = p.parent
     end
@@ -154,10 +171,11 @@ function prevAttrs(node::TreeNode)
 end
 
 function splitLeaf(node::TreeNode, onAttr::Int64, epsilon::Float64)
+
     # Clean out old objects
-    node.m = nothing
-    node.p = nothing
-    node.updatedAttrs = nothing
+    node.m = Model.Counting( node.datashape )
+    node.p = Model.Probability( node.m )
+    node.updatedAttrs = IntSet()
     node.height = 1
 
     for n in getParentVisitor(node)
@@ -167,13 +185,14 @@ function splitLeaf(node::TreeNode, onAttr::Int64, epsilon::Float64)
     node.isLeaf = false
     node.attr = onAttr
     node.epsilon = epsilon
-    node.low  = TreeNode(node.tree, node, node.datashape)
-    node.high = TreeNode(node.tree, node, node.datashape)
-    
+    node.low  = TreeNode(node, node.datashape)
+    node.high = TreeNode(node, node.datashape)
+
     node.low.depth = node.depth + 1
     node.high.depth = node.depth + 1
 end
 
+# Not used yet, need to setup pruning
 function collapseNode(node::TreeNode)
 
     if !node.isLeaf
@@ -183,16 +202,16 @@ function collapseNode(node::TreeNode)
 
         for n in getVisitor(node)
             Model.merge!(node.m, n.m)
-            n.parent = nothing
-            n.m=nothing
-            n.p=nothing
+            n.parent = TreeNode()
+            n.m = Model.Counting(n.datashape)
+            n.p = Model.Probability(n.m)
         end
-        
+
         node.p = Model.probModel(node.m)
         node.attr=0
         node.isLeaf = true
-        node.low=nothing
-        node.high=nothing
+        node.low = TreeNode()
+        node.high = TreeNode()
     end
 end
 
@@ -200,15 +219,9 @@ end
 #   This is the inner loop of the VFDT where we decide to split the leaf
 #       if needed.
 #
-function updateLeaf(node::TreeNode, params::Params, force::Bool)
-    
-    leaf.ttl += 1
+function updateLeaf(leaf::TreeNode, params::Params, force::Bool)
 
-    if leaf.p == nothing
-        leaf.p = Model.probModel( leaf.m )
-    else
-        Model.update(leaf.updatedAttrs, leaf.p, leaf.m)
-    end
+    leaf.ttl += 1
 
     pc = 0.0
     for i=1:size(leaf.p.pclass,1)
@@ -217,39 +230,41 @@ function updateLeaf(node::TreeNode, params::Params, force::Bool)
             leaf.label = i
         end
     end
-    
+
     if leaf.depth < params.maxDepth && leaf.ttl > params.ttl
+
+        Model.update(leaf.updatedAttrs, leaf.p, leaf.m)
         ignoreAttrs = prevAttrs(leaf)
-        
+
         # Now loop over attributes and find the best 2 attributes
-        aBest = 0
-        aNext = 0
+        bestAttr = 0
+        nextBestAttr = 0
         bestG = 0
         nextG = 0
-        
-        for n=1:length(leaf.p.pfeature)
+
+        for n in setdiff(leaf.updatedAttrs, ignoreAttrs)
             nG = params.G(leaf.p, n)
             if nG > bestG
                 nextG = bestG
-                aNext = aBest
+                nextBestAttr = bestAttr
                 bestG = nG
-                aBest = n
+                bestAttr = n
             elseif nG > nextG
                 nextG = nG
-                aNext = n
+                nextBestAttr = n
             end
         end
-        
-        epsilon = sqrt( log(1/params.delta) / (2 * leaf.m.n)  )
-        gradient = bestG - nextG
-        
-        if gradient > params.delta || gradient < params.tieLimit
-            splitLeaf(leaf, aBest)
+
+        if bestAttr != 0
+          epsilon = sqrt( log(1/params.delta) / (2 * leaf.m.n)  )
+          gradient = bestG - nextG
+
+          if gradient > params.delta || gradient < params.tieLimit
+              splitLeaf(leaf, bestAttr, epsilon)
+          end
         end
-        
-        node.ttl=0
     end
-    
+
 end
 
 function updateLeaf(node::TreeNode, params::Params)
@@ -260,17 +275,17 @@ end
 #   Allows us to simply use the tree for clustering...
 #
 function routeAndCount(stream::Task, tree::HoeffdingTree)
-    
+
     for l in @task visitLeaves(tree.root)
         l.m = spzeros(size(l.m,1), size(l.m,2))
     end
-    
+
     for r in stream
         l = sortToLeaf(tree,root, r)
         Model.countRow(r, l.m)
-        Model.countFeatureOverlaps(r, l.m) 
+        Model.countFeatureOverlaps(r, l.m)
     end
-   
+
 end
 
 # Training is simple
@@ -278,23 +293,26 @@ function train(tree::HoeffdingTree, data::Data.Dataset)
     nbins = tree.shape.unique
     tmpVec = zeros( tree.shape.features * nbins )
 
-    for row in streams
+    for row in Data.eachrow(data, true)
+        fill!(tmpVec,0)
         Model.project!(row, tmpVec, nbins)
-        
+
         leaf = sortToLeaf(tree.root, tmpVec)
         for t in row.values
             push!(leaf.updatedAttrs, t[1])
         end
-        
+
         Model.countRow(row, leaf.m)
-        updateLeaf(leaf, params)
+
+        updateLeaf(leaf, tree.params)
     end
-    
+
     return tree
 end
 
 function label(tree::HoeffdingTree, params::Dict, stream::Task)
 
+    nbins = tree.shape.unique
     mode = get(params,"mode","naivebayes")
     const naiveBayesLeaves = (mode == "naivebayes")
     const produceRanks = get(params, "ranks", false)
@@ -303,26 +321,32 @@ function label(tree::HoeffdingTree, params::Dict, stream::Task)
     for leaf in getLeafVisitor(tree.root)
         Model.update(leaf.updatedAttrs, leaf.p, leaf.m)
         if naiveBayesLeaves
-            leaf.nb = NaiveBayes.NBPredModel(leaf.m)
+          leaf.nb = NaiveBayes.NBPredModel(leaf.p, false)
         end
         leaf.label = indmax(leaf.p.pclass)
-        
+
         if produceRanks
-            rnks = map((i) -> Common.Ranking(i, leaf.p.pclass), 1:size(leaf.p.pclass))
-            sort!(rnks, by=(x) -> -x.value)
-            leaf.ranks = rnks
+          rnks = map((i) -> Common.Ranking(i, leaf.p.pclass), 1:size(leaf.p.pclass))
+          sort!(rnks, by=(x) -> -x.value)
+          leaf.ranks = rnks
         end
     end
-    
+
+    rowAsVec = zeros( tree.shape.features * nbins )
+
     # Do the actual labelling
     if produceRanks
         for row in stream
-            produce( sortToLeaf(tree.root, row).ranks  )
+          fill!(rowAsVec,0)
+          Model.project!(row, rowAsVec, nbins)
+          produce( (sortToLeaf(tree.root, rowAsVec).ranks, row.labels)  )
         end
     else
         for row in stream
-            produce( sortToLeaf(tree.root, row).label  )
-        end
+          fill!(rowAsVec,0)
+          Model.project!(row, rowAsVec, nbins)
+          produce( (sortToLeaf(tree.root, rowAsVec).label, row.labels)  )
+      end
     end
 
 end

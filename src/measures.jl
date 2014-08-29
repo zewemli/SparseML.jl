@@ -274,31 +274,33 @@ function gain(m::Model.Probability, attr::Int64)
     s = 0.0
     for i=1:size(m.prob,1)
         v = m.prob[i,attr]
-        s += v*log(v)
+        if v != 0
+          s += v*log(v)
+        end
     end
     return -s
 end
 
-export ConfusionMatrix, 
+export ConfusionMatrix,
         dist,
         inc,
         precision,
         recall,
         sensitivity,
         specificity,
-        npv, 
-        fallout, 
-        falsediscovery, 
-        missrate, 
+        npv,
+        fallout,
+        falsediscovery,
+        missrate,
         accuracy,
-        f1, 
+        f1,
         fbeta,
         mcc,
         informedness,
         markedness,
-        macrof1, 
-        kl, 
-        npmi, 
+        macrof1,
+        kl,
+        npmi,
         gini,
         gain
 end # module

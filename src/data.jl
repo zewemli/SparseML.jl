@@ -7,7 +7,7 @@ type Row
     qid::Int64
     num::Int64
     values::Vector{Value}
-    
+
     nbins::Int64
 end
 
@@ -48,7 +48,7 @@ type Dataset
 
     function Dataset(source::String)
 
-        ds = Dataset(Shape(0,0,1), getExt(source), 0, [], [source])
+        ds = new(Shape(0,0,1), getExt(source), 0, [], [source])
 
         open(source) do f
             if ds.ext == "dat"
@@ -56,10 +56,10 @@ type Dataset
                 if beginswith(l, "#")
                     # expecting "# Shape 1,2,3"
                     sizes = split(split(strip(l)," ")[end],",")
-                    if length(size) == 3
-                        ds.shape = Shape(size[1], sizes[2], sizes[3])
+                    if length(sizes) == 3
+                        ds.shape = Shape(sizes[1], sizes[2], sizes[3])
                     else
-                        ds.shape = Shape(size[1], sizes[2], 1)
+                        ds.shape = Shape(sizes[1], sizes[2], 1)
                     end
                 else
                     seekstart(f)
@@ -71,7 +71,7 @@ type Dataset
                 ds.classname = [ "$i" for i=1:ds.shape.classes ]
 
             elseif ds.ext == "arff"
-                nattrs = -1
+                nattrs = 0
                 maxn = 0
                 prevmax = 0
                 nclasses = 0
@@ -157,7 +157,8 @@ function arffParse(line::ASCIIString, classMap::Dict{ASCIIString,Int64}, rowNum:
 
     row = Row(IntSet(), 0, rowNum, [], 1)
 
-    if startswith(line,"{")
+    if beginswith(line,"{")
+
 
         kstart = 1
         knext = 0
@@ -166,27 +167,31 @@ function arffParse(line::ASCIIString, classMap::Dict{ASCIIString,Int64}, rowNum:
             kmid = searchindex(line," ", kstart)
 
             kID = parseint(line[kstart+1 : kmid-1])
+
             if knext > 0
                 kVal  = line[kmid+1 : knext-1]
+                push!(row.values, (kID+1, parsefloat(kVal)))
             else
                 # the end-2 part skips the new line and the final "}"
-                kVal = line[kmid+1 : end-2]
+                push!(row.labels, get!(classMap, line[kmid+1:end-2], length(classMap)+1))
             end
-            push!(row.values, (kID+1, parsefloat(kVal)))
             kstart = knext
         end
 
     else
 
-        classID += 1
         i=1
         k=1
+
         while k > 0
             kNext = searchindex(line, ",", k+1)
-            if i == classID
-                push!(row.labels, get!(classMap, line[k+1:kNext-1], length(classMap)+1))
+            if kNext == 0
+                push!(row.labels, get!(classMap, line[k+1:end-1], length(classMap)+1))
             else
-                push!(row.values, (i, parsefloat(line[k+1:kNext-1])))
+                iVal = parsefloat(line[k+1:kNext-1])
+                if iVal != 0.0
+                  push!(row.values, (i,iVal) )
+                end
             end
             i += 1
             k = kNext
@@ -202,14 +207,10 @@ function svmlightParse(line::ASCIIString, nClasses::Int64, n::Int64)
     featStart = rsearchindex(line, " ", searchindex(line, ":"))
     # Get labels
     for l in split(strip(line[1:featStart-1]), " ")
-        try
-            lInt = parseint(l)
-            if lInt != 0
-                lInt = lInt < 0 ? nClasses + lInt + 1 : lInt
-                push!(row.labels, lInt)
-            end
-        catch y
-            println(y,":",l,"|")
+        lInt = parseint(l)
+        if lInt != 0
+            lInt = lInt < 0 ? nClasses + lInt + 1 : lInt
+            push!(row.labels, lInt)
         end
     end
 
@@ -224,16 +225,11 @@ function svmlightParse(line::ASCIIString, nClasses::Int64, n::Int64)
     while featStart > 0
         featMid = searchindex(line, ":", featStart)
         featEnd = searchindex(line," ", featMid)
-        try
-            if featEnd > 0
-                push!(row.values, ( parseint(line[featStart:featMid-1]), parsefloat(line[featMid+1:featEnd]) ) )
-            else
-                push!(row.values, ( parseint(line[featStart:featMid-1]), parsefloat(line[featMid+1:end]) ))
-            end
-        catch
-
+        if featEnd > 0
+            push!(row.values, ( parseint(line[featStart:featMid-1]), parsefloat(line[featMid+1:featEnd]) ) )
+        else
+            push!(row.values, ( parseint(line[featStart:featMid-1]), parsefloat(line[featMid+1:end]) ))
         end
-
         featStart = featEnd
     end
 
@@ -292,7 +288,7 @@ end
 function arffIter(stream::IOStream, nbins::Int64, closeOnEnd::Bool)
 
     # Move past the arff header
-    lastNum = -1
+    lastNum = 0
     for l in eachline(stream)
         if beginswith(l, "@data") || beginswith(l, "@DATA")
             break
@@ -301,17 +297,16 @@ function arffIter(stream::IOStream, nbins::Int64, closeOnEnd::Bool)
         end
     end
 
-    if classID < 0
-        classID = lastNum
-    end
+    # TODO: Read the class names...
+    classMap = Dict{ASCIIString,Int64}()
 
     rowNumber=1
-    row = arffNext(stream, classMap, classID, rowNumber)
+    row = arffNext(stream, classMap, rowNumber)
     while row != nothing
         row.nbins = nbins
         rowNumber += 1
         produce( row )
-        row = arffNext(stream, classMap, classID, rowNumber)
+        row = arffNext(stream, classMap, rowNumber)
     end
 
     if closeOnEnd
@@ -333,6 +328,28 @@ end
 
 function eachrow(data::Dataset)
     return @task eachrowTask(data)
+end
+
+function eachrow(data::Dataset, verbose::Bool)
+    return @task eachrowTaskVerbose(data)
+end
+
+function eachrowTaskVerbose(data::Dataset)
+
+  start = time()
+  i = 1000
+  n = 0
+  for r in eachrow(data)
+    i -= 1
+    if i==0
+      i=1000
+      lps = r.num / (time() - start)
+      println("Reading at: $(lps) lps")
+    end
+
+    produce(r)
+  end
+
 end
 
 function write(data::Dataset, rows::Task, topath::String)
