@@ -1,6 +1,6 @@
 #!/usr/bin/env julia
 using ArgParse
-import SparseML: Common, Data, Model, Measures, VFDT, KNN, NaiveBayes, train, label
+import SparseML: Common, Data, Model, Measures, VFDT, KNN, NaiveBayes, train, label, save, load
 using JSON
 
 function parse_commandline()
@@ -27,22 +27,25 @@ function parse_commandline()
         "--pred"
             help = "Save predictions to this file"
             arg_type = String
+        "--confusion"
+            help = "Write a confusion matrix to stdout"
+            action = :store_true
     end
 
     return parse_args(s)
 end
 
-function writeLabel(label::Int64, labels::IntSet, f::IOStream)
+function writeLabel(label::Int64, labels::IntSet, f::IO)
     real_labels = join(labels," ")
-    write(f, "$(label),$(real_labels)\n")
+    println(f, label,",",real_labels)
 end
 
-function writeLabel(ranks::Vector{Common.Ranking}, labels::IntSet, f::IOStream)
+function writeLabel(ranks::Vector{Common.Ranking}, labels::IntSet, f::IO)
     real_labels = join(labels," ")
     for r in ranks
-        write(f, "$(r.class):$(r.value) ")
+        println(f, r.class,":",r.value," ")
     end
-    write(f, ",$(real_labels)\n")
+    println(f, ",", real_labels)
 end
 
 function main()
@@ -64,18 +67,18 @@ function main()
     end
 
     paramsName = get(flags,"params",nothing)
-    params = Dict()
+    params = Dict{String,Any}()
     if paramsName != nothing && isfile( paramsName )
         params = JSON.parsefile( paramsName )
     end
 
     trainingFiles = get(flags, "train", [])
     if length( trainingFiles ) > 0
-        println("Started training")
+        println(STDERR,"Started training")
         start = time()
         model = train(model, params, Data.Dataset(trainingFiles))
         delta = time() - start
-        println(" done in $(delta) seconds")
+        println(STDERR," done in $(delta) seconds")
         if flags["save"] != nothing
             save(flags["save"], model)
         end
@@ -83,7 +86,7 @@ function main()
 
     testingFiles = get(flags, "label", [])
     if length( testingFiles ) > 0
-        println("Started testing")
+        println(STDERR,"Started testing")
         start = time()
         testingData = Data.Dataset(testingFiles)
         labelingTask = label(model, params, Data.eachrow(testingData, true))
@@ -91,17 +94,48 @@ function main()
         if flags["pred"] != nothing
             pred_name = flags["pred"]
             outfile = open(pred_name, "w")
-            print(" writing to $(pred_name)")
+            print(STDERR," writing to $(pred_name)")
         else
-          print(" writing to stdout")
+          print(STDERR," writing to stdout")
         end
 
-        for lbl in labelingTask
-            writeLabel(lbl[1], lbl[2], outfile)
+        # This doesn't work with ranking...
+        if flags["confusion"] == true
+
+          matrix = zeros( testingData.shape.classes, testingData.shape.classes )
+
+          const write_preds = flags["pred"] != nothing
+
+          for lbl in labelingTask
+              if write_preds
+                writeLabel(lbl[1], lbl[2], outfile)
+              end
+
+              for real in lbl[2]
+                println(":", lbl)
+                matrix[ convert(Int64, lbl[1]) , convert(Int64, real) ] += 1
+              end
+          end
+
+          println("Confusion matrix")
+          for i=1:testingData.shape.classes
+            print(STDOUT,matrix[i,1])
+            for j=2:testingData.shape.classes
+              print(STDOUT,",",matrix[i,j])
+            end
+            print(STDOUT,"\n")
+          end
+
+        else
+
+          for lbl in labelingTask
+              writeLabel(lbl[1], lbl[2], outfile)
+          end
+
         end
 
         delta = time() - start
-        println(" done in $(delta) seconds")
+        println(STDERR," done in $(delta) seconds")
 
     end
 

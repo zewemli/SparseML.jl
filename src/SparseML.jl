@@ -14,6 +14,7 @@ include("knn.jl")
 include("vfdt.jl")
 
 MLModel = Union(Type{VFDT.HoeffdingTree}, Type{NaiveBayes.NB}, Type{KNN.Subset})
+MLModelInst = Union(VFDT.HoeffdingTree, NaiveBayes.NB, KNN.Subset)
 
 function load(path::String)
     open(path) do f
@@ -21,7 +22,11 @@ function load(path::String)
     end
 end
 
-function save(path::String, model)
+function save(path::String, knn::KNN.Subset)
+  Data.write(knn.shape, knn.subset, path)
+end
+
+function save(path::String, model::MLModelInst)
     open(path, "w") do f
         serialize(f, model)
     end
@@ -30,19 +35,19 @@ end
 #
 #   To train a model we need a model type and labelled data
 #
-function train(model::String, params::Dict{Any,Any}, data::Data.Dataset)
-    train(load(model), params, data)
+function train(model::String, params::Common.Params, data::Data.Dataset)
+    train(load(model), data)
 end
 
-function train(modelType::MLModel, params::Dict{Any,Any}, data::Data.Dataset)
+function train(modelType::MLModel, params::Common.Params, data::Data.Dataset)
     train(modelType(data.shape, params), data)
 end
 
-function label(model::String, params::Dict{Any,Any}, stream::Task)
+function label(model::String, params::Common.Params, stream::Task)
     @task label(load(model), params, stream)
 end
 
-function label(model::MLModel, params::Dict{Any,Any}, stream::Task)
+function label(model::MLModel, params::Common.Params, stream::Task)
     @task label(model, params, stream)
 end
 
@@ -51,7 +56,7 @@ function train(model::VFDT.HoeffdingTree, data::Data.Dataset)
     VFDT.train(model, data)
 end
 
-function label(model::VFDT.HoeffdingTree, params::Dict{Any,Any}, stream::Task)
+function label(model::VFDT.HoeffdingTree, params::Common.Params, stream::Task)
     @task VFDT.label(model, params, stream)
 end
 
@@ -60,7 +65,7 @@ function train(model::NaiveBayes.NB, data::Data.Dataset)
     NaiveBayes.train(model, data)
 end
 
-function label(model::NaiveBayes.NB, params::Dict{Any,Any}, stream::Task)
+function label(model::NaiveBayes.NB, params::Common.Params, stream::Task)
     @task NaiveBayes.label(model, params, stream)
 end
 
@@ -69,7 +74,7 @@ function train(model::KNN.Subset, data::Data.Dataset)
     KNN.train(model, data)
 end
 
-function label(model::KNN.Subset, params::Dict{Any,Any}, stream::Task)
+function label(model::KNN.Subset, params::Common.Params, stream::Task)
     @task KNN.label(model, params, stream)
 end
 

@@ -27,6 +27,33 @@ type Counting
     Counting() = new(spzeros(0,0), Int64[], Int64[], spzeros(0,0), spzeros(0,0), 0, 0)
 end
 
+function merge(a::Counting,b::Counting)
+  c = Counting( length(a.classcount),
+                length(a.featurecount),
+                a.nBins, )
+  c.overlap = a.overlap + b.overlap
+  c.classcount = a.classcount + b.classcount
+  c.featurecount = a.featurecount + b.featurecount
+  c.classoverlap = a.classoverlap + b.classoverlap
+  c.featureoverlap = a.featureoverlap + b.featureoverlap
+  c.n = a.n + b.n
+
+  return c
+end
+
+
+function merge!(a::Counting,b::Counting)
+  a.overlap += b.overlap
+  a.classcount += b.classcount
+  a.featurecount += b.featurecount
+  a.classoverlap += b.classoverlap
+  a.featureoverlap += b.featureoverlap
+  a.n += b.n
+
+  return a
+end
+
+
 type Probability
 
     prob::SparseMatrixCSC{Float64,Int64}
@@ -136,30 +163,45 @@ function project(sv::Data.Value, row::Data.Row)
 end
 
 function project!(r::Data.Row, v::Vector{Float64}, nBins::Int64)
+  try
     for val in r.values
-        v[ project(val, r) ] = 1
+      v[ project(val, nBins) ] = 1
     end
+  catch
+    println(STDERR, "Unable to project row ", r.num, " perhaps ", project(r.values[end], r), " > ", length(v) )
+    exit()
+  end
+end
+
+function project!(r::Data.Row, v::Vector{Float64}, nBins::Int64, targets::IntSet)
+  try
+    for val in r.values
+      t = project(val, nBins)
+      push!(targets, t)
+      v[ t ] = 1
+    end
+  catch
+    println(STDERR, "Unable to project row ", r.num, " perhaps ", project(r.values[end], r), " > ", length(v) )
+    exit()
+  end
 end
 
 # Counting model methods
 function countRow(row::Data.Row, model::Counting)
-
     nclasses = size(model.classcount,1)
-
     model.n += 1
 
     for t in row.values
-        model.featurecount[ project(t, row) ] += 1
+        tidx = project(t,row)
+        model.featurecount[ tidx ] += 1
+
+        for c in row.labels
+            model.overlap[ c, tidx ] += 1
+        end
     end
 
     for c in row.labels
-
         model.classcount[c] += 1
-
-        for t in row.values
-            model.overlap[ c, project(t, row) ] += 1
-        end
-
     end
 end
 

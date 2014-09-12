@@ -55,7 +55,7 @@ type Dataset
                 l = readline(f)
                 if beginswith(l, "#")
                     # expecting "# Shape 1,2,3"
-                    sizes = split(split(strip(l)," ")[end],",")
+                    sizes = map(parseint, split(split(strip(l)," ")[end],","))
                     if length(sizes) == 3
                         ds.shape = Shape(sizes[1], sizes[2], sizes[3])
                     else
@@ -140,10 +140,11 @@ function rowAsVec(r::Row, len::Int64)
 end
 
 function vecAsRow(vec::Vector{Float64})
-  r = Row(IntSet(),0,0,[])
+
+  r = Row(IntSet(),0,0,[],1)
   for i=1:length(vec)
     if vec[i] != 0
-      push!(r.values, Value(i,vec[i]))
+      push!(r.values, (i,vec[i],) )
     end
   end
   return r
@@ -236,7 +237,7 @@ function svmlightParse(line::ASCIIString, nClasses::Int64, n::Int64)
     return row
 end
 
-function svmlightNext(stream::IOStream, nClasses::Int64, n::Int64)
+function svmlightNext(stream::IO, nClasses::Int64, n::Int64)
     line = readline(stream)
     # Skip comments
     while !eof(stream) && ((length(line) == 0) || (line[1] == '#'))
@@ -250,7 +251,7 @@ function svmlightNext(stream::IOStream, nClasses::Int64, n::Int64)
     end
 end
 
-function arffNext(stream::IOStream, classMap::Dict{ASCIIString,Int64}, rowNum::Int64)
+function arffNext(stream::IO, classMap::Dict{ASCIIString,Int64}, rowNum::Int64)
     line = readline(stream)
     # Skip comments
     while !eof(stream) && ((length(line) == 0) || (line[1] == '%'))
@@ -264,7 +265,7 @@ function arffNext(stream::IOStream, classMap::Dict{ASCIIString,Int64}, rowNum::I
     end
 end
 
-function svmlightIter(stream::IOStream, nClasses::Int64, nbins::Int64, closeOnEnd::Bool)
+function svmlightIter(stream::IO, nClasses::Int64, nbins::Int64, closeOnEnd::Bool)
     rownumber=1
     ptime = time()
     row = svmlightNext(stream, nClasses, rownumber)
@@ -275,7 +276,7 @@ function svmlightIter(stream::IOStream, nClasses::Int64, nbins::Int64, closeOnEn
             rownumber +=1
             row = svmlightNext(stream, nClasses, rownumber)
         catch y
-            write(STDERR, string(rownumber,": exception", y,"\n"))
+            println(STDERR, string(rownumber,": exception", y))
         end
     end
 
@@ -285,7 +286,7 @@ function svmlightIter(stream::IOStream, nClasses::Int64, nbins::Int64, closeOnEn
 end
 
 # ARFF has not been tested and isn't really supported yet...
-function arffIter(stream::IOStream, nbins::Int64, closeOnEnd::Bool)
+function arffIter(stream::IO, nbins::Int64, closeOnEnd::Bool)
 
     # Move past the arff header
     lastNum = 0
@@ -337,14 +338,17 @@ end
 function eachrowTaskVerbose(data::Dataset)
 
   start = time()
+  prev = start
   i = 1000
   n = 0
   for r in eachrow(data)
     i -= 1
-    if i==0
+    if i==0 || (time()-prev) > 10
       i=1000
       lps = r.num / (time() - start)
-      println("Reading at: $(lps) lps")
+      inst = r.num / (prev - start)
+      prev =  time()
+      println(STDERR,"Reading at: $(inst), or $(lps) avg. lps")
     end
 
     produce(r)
@@ -352,22 +356,25 @@ function eachrowTaskVerbose(data::Dataset)
 
 end
 
-function write(data::Dataset, rows::Task, topath::String)
+function write(data::Dataset, rows::Task, toPath::String)
+    write(data.shape, rows, toPath)
+end
+
+function write(shape::Shape, rows, topath::String)
     open(topath, "w") do f
-        s = data.shape
-        write(f, "# Shape $(s.classes),$(s.features),$(s.unique)\n")
+        print(f, "# Shape $(s.classes),$(s.features),$(s.unique)\n")
         for row in rows
-            write(f, join(row.labels, " "))
+            print(f, join(row.labels, " "))
             if row.qid != 0
                 q = row.qid
-                write(f, " qid:$q")
+                print(f, " ",qid,":",q)
             end
 
             for (i,v) in row.values
                 vInt=convert(Int64, v)
-                write(f, " $i:$vInt")
+                print(f, " ",i,":",vInt)
             end
-            write(f, "\n")
+            print(f, "\n")
         end
     end
 end
@@ -395,7 +402,7 @@ function getStats(stream::Task)
     DataStats(length(classes), maximum(features), maxVal, minVal, nvals/(maximum(features) * nrows), nrows, length(vals))
 end
 
-function getStats(stream::IOStream)
+function getStats(stream::IO)
     seekstart(stream)
     stats = getStats(readsparse(stream))
     seekstart(stream)

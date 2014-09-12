@@ -65,7 +65,8 @@ function accuracy(m::ConfusionMatrix)
 end
 
 function fbeta(m::ConfusionMatrix, beta::Float64)
-    (1 + (beta ^ 2)) * ((precision(m) * recall(m)) / (((beta^2) * precision(m)) + recall(m)))
+    fb = (1 + (beta ^ 2)) * ((precision(m) * recall(m)) / (((beta^2) * precision(m)) + recall(m)))
+    isfinite(fb) ? fb : 0
 end
 
 function f1(m::ConfusionMatrix)
@@ -91,7 +92,8 @@ end
 function macrof1(M::Vector{ConfusionMatrix})
     p = sum([ precision(M[i]) for i=1:length(M) ]) / length(M)
     r = sum([ recall(M[i]) for i=1:length(M) ]) / length(M)
-    (2 * p * r) / (p+r)
+    mf1 = (2 * p * r) / (p+r)
+    isfinite(mf1) ? mf1 : 0.0
 end
 
 # Using L1
@@ -271,14 +273,21 @@ function gini(m::Model.Probability, attr::Int64)
 end
 
 function gain(m::Model.Probability, attr::Int64)
+    pf = m.pfeature[attr]
     s = 0.0
+    v = 0.0
+    for i=1:length(m.pclass)
+      p = m.pclass[i]
+      v -= (p > 0) ? p*log(p) : 0
+    end
+
     for i=1:size(m.prob,1)
         v = m.prob[i,attr]
-        if v != 0
-          s += v*log(v)
-        end
+        s -= (v == 0) ? 0 : v*log(v)
     end
-    return -s
+    ig = s-v
+    ratio = ig / (pf * log(pf))
+    return pf == 0.0 ? 0.0 : ratio
 end
 
 export ConfusionMatrix,
