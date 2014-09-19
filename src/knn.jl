@@ -16,32 +16,32 @@ typealias RowQ Collections.PriorityQueue{Data.Row, Float64}
 #    Knowledge and Data Engineering, IEEE Transactions on 19.11 (2007): 1450-1464.
 
 type Params
-    k::Int64
-    kMetric::Float64
-    maxSize::Int64
+  k::Int64
+  kMetric::Float64
+  maxSize::Int64
 
-    function Params(params::Common.Params)
-      new( get(params,"k",10),
-            get(params,"kMetric",2),
-            get(params, "max", 10000), )
-    end
+  function Params(params::Common.Params)
+    new( get(params,"k",10),
+        get(params,"kMetric",2),
+        get(params, "max", 10000), )
+  end
 end
 
 type Subset
-    shape::Data.Shape
-    count::Model.Counting
-    subsetcount::Model.Counting
-    subset::Vector{Data.Row}
-    stage::Int64
-    params::Params
-    function Subset(shape::Data.Shape, params::Common.Params)
-        new(shape,
-            Model.Counting(shape),
-            Model.Counting(shape),
-            [],
-            InitStage,
-            Params(params) )
-    end
+  shape::Data.Shape
+  count::Model.Counting
+  subsetcount::Model.Counting
+  subset::Vector{Data.Row}
+  stage::Int64
+  params::Params
+  function Subset(shape::Data.Shape, params::Common.Params)
+    new(shape,
+        Model.Counting(shape),
+        Model.Counting(shape),
+        [],
+        InitStage,
+        Params(params) )
+  end
 end
 
 function eachTask(S::Vector{Data.Row})
@@ -55,7 +55,7 @@ function each(S::Vector{Data.Row})
 end
 
 function getCentroid(count::Model.Counting, class::Int64)
-  r = Data.Row(IntSet(class), 0, count.n + class, [], 1)
+  r = Data.Row(IntSet(class), 0, count.n + class, Data.Value[])
   cn = 1/count.classcount[class]
 
   for i=1:size(count.overlap,2)
@@ -69,11 +69,11 @@ function getCentroid(count::Model.Counting, class::Int64)
 end
 
 function getNN(point::Data.Row,
-                  cloud::Vector{Data.Row},
-                  queue::RowQ,
-                  cache::SparseMatrixCSC{Float64,Int64},
-                  kMetric::Float64,
-                  k::Int64)
+               cloud::Vector{Data.Row},
+               queue::RowQ,
+               cache::SparseMatrixCSC{Float64,Int64},
+               kMetric::Float64,
+               k::Int64)
   for p in cloud
     update!(queue, p, dist(p,point,kMetric), k)
   end
@@ -81,19 +81,19 @@ function getNN(point::Data.Row,
 end
 
 function getNN(point::Data.Row,
-                  cloud::Vector{Data.Row},
-                  queue::RowQ,
-                  cache::SparseMatrixCSC{Float64,Int64},
-                  params::Params)
+               cloud::Vector{Data.Row},
+               queue::RowQ,
+               cache::SparseMatrixCSC{Float64,Int64},
+               params::Params)
   getNN(point, cloud, queue, cache, params.kMetric, params.k)
 end
 
 
 function getNN(point::Data.Row,
-                  cloud::Vector{Data.Row},
-                  queue::RowQ,
-                  kMetric::Float64,
-                  k::Int64)
+               cloud::Vector{Data.Row},
+               queue::RowQ,
+               kMetric::Float64,
+               k::Int64)
   for p in cloud
     update!(queue, p, dist(p,point,kMetric), k)
   end
@@ -101,12 +101,12 @@ function getNN(point::Data.Row,
 end
 
 function getNN(point::Data.Row,
-                  cloud::Vector{Data.Row},
-                  start::Int64,
-                  finish::Int64,
-                  queue::RowQ,
-                  kMetric::Float64,
-                  k::Int64)
+               cloud::Vector{Data.Row},
+               start::Int64,
+               finish::Int64,
+               queue::RowQ,
+               kMetric::Float64,
+               k::Int64)
   for i=start:finish
     p = cloud[i]
     update!(queue, p, dist(p, point, kMetric), k)
@@ -171,11 +171,11 @@ function dist(a::Data.Row, b::Data.Row, k::Float64)
       i += 1
       j += 1
       try
-      d += abs(av - bv)^k
-    catch
-      println("(",av," - ", bv, ") ^ ", k)
-      exit()
-    end
+        d += abs(av - bv)^k
+      catch
+        println("(",av," - ", bv, ") ^ ", k)
+        exit()
+      end
     end
   end
 
@@ -208,21 +208,16 @@ end
 # which are > v and those which are not...
 #
 function find(values::Vector{Float64}, v::Float64, first::Int64, last::Int64)
-
   if (first + 1) >= last
     return first
   else
-
     mid = convert(Int64,floor((first + last)/2))
-
     if values[mid] > v
       return find(values, v, first, mid)
     else
       return find(values, v, mid, last)
     end
-
   end
-
 end
 
 function find(values::Vector{Float64}, v::Float64)
@@ -232,7 +227,7 @@ end
 function train(model::Subset, data::Data.Dataset)
 
   if model.stage == InitStage
-    Model.count(Data.eachrow(data, true), model.count, false)
+    Model.count(Data.eachrow(data), model.count, false)
     model.stage=IteratingStage
   end
 
@@ -253,7 +248,7 @@ function train(model::Subset, data::Data.Dataset)
   SDelta = SDelta=Data.Row[]
 
   println(STDERR,"Finding $(model.params.k) central examples for each class")
-  for query in Data.eachrow(data, true)
+  for query in Data.eachrow(data)
     qkMin = Inf
     for k=1:nclasses
 
@@ -295,7 +290,7 @@ function train(model::Subset, data::Data.Dataset)
     comps = 0
 
     # for each (q in (T-S))
-    for query in Data.eachrow(data, true)
+    for query in Data.eachrow(data)
       if !in(query.num, haveRows)
         qNeighbors = nearest[query.num]
         qGroup, qDist = q_center[query.num]
@@ -305,8 +300,8 @@ function train(model::Subset, data::Data.Dataset)
           if p.num != query.num
             comps += 1
             update!(qNeighbors, p,
-                        dist(query, p, model.params.kMetric),
-                        model.params.k)
+                    dist(query, p, model.params.kMetric),
+                    model.params.k)
           end
         end
 
@@ -332,7 +327,7 @@ function train(model::Subset, data::Data.Dataset)
 
     for p in S
       if haskey(rep, p.num)
-          push!(SDelta, rep[p.num][1])
+        push!(SDelta, rep[p.num][1])
       end
     end
 
@@ -357,17 +352,17 @@ function label(model::Subset, params::Common.Params, stream::Task)
     distCenter = dist(center, r, model.params.kMetric)
 
     produce(
-        (labelNN(r,
-            getNN(r,
-                model.subset,
-                find(subdist, clamp(distCenter/2, 1, sublen)), # low end
-                find(subdist, clamp(distCenter*2, 1, sublen)), # high end
-                neigh,
-                model.params.kMetric,
-                model.params.k)), r.labels))
+      (labelNN(r,
+               getNN(r,
+                     model.subset,
+                     find(subdist, clamp(distCenter/2, 1, sublen)), # low end
+                     find(subdist, clamp(distCenter*2, 1, sublen)), # high end
+                     neigh,
+                     model.params.kMetric,
+                     model.params.k)), r.labels))
   end
 
-    return model
+  return model
 end
 
 export train, label, Subset

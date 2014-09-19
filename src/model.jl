@@ -1,280 +1,283 @@
 module Model
 
 import ..Data
+import Distributions: Normal, pdf, logpdf
 
+typealias SparseMat SparseMatrixCSC{Float64,Int64}
+
+## Discrete Models
 # Provide a model for counting overlaps and intersections
 # this is the model which should be saved to disk
+
+type DiscCount
+  shape::Data.Shape
+  conditional::SparseMat
+  feature::Vector{Int64}
+  n::Int64
+
+  function DiscCount(shape::Data.Shape)
+    new(shape,
+        spzeros(shape.labels, shape.discFeatures),
+        zeros(shape.offsets[end]),
+        0)
+  end
+
+  DiscCount() = DiscCount(Data.Shape())
+end
+
+type DiscProb
+  shape::Data.Shape
+  conditional::SparseMat
+  feature::Vector{Float64}
+  pMin::Float64
+
+  function DiscProb(m::DiscCount, pLabel::Vector{Float64})
+
+    prob = new( m.shape,
+               similar(m.conditional),
+               similar(m.feature),
+               estPMin(m, estExtra(m)) )
+
+    if m.n > 0
+      I,J,V = findnz(m.conditional)
+
+      prob.feature = ./(m.feature, m.n)
+
+      for (c, f, f_and_c) in zip(I,J,V)
+        cf_val = f_and_c / (m.label[c] + extraN*pLabel[c])
+        prob.conditional[ c,f ] = isfinite(cf_val) ? cf_val : 0
+      end
+    end
+
+    return prob
+  end
+
+end
+
+## Normal Models
+type GaussianStream
+  n::Int64
+  m::Float64
+  s::Float64
+  GaussianStream() = new(0,0.,0.)
+end
+
+type NormalCount
+  shape::Data.Shape
+  conditional::Matrix{GaussianStream}
+  feature::Vector{GaussianStream}
+
+  function NormalCount(shape::Data.Shape)
+    new(shape,
+        [ GaussianStream() for j=1:shape.labels, i=1:shape.realFeatures ],
+        [ GaussianStream() for i=1:shape.realFeatures ])
+  end
+end
+
+type NormalProb
+  shape::Data.Shape
+  conditional::Matrix{Normal}
+  feature::Vector{Normal}
+
+  function NormalProb(counts::NormalCount, pLabel::Vector{Float64})
+    new(counts.shape,
+        [ Normal(counts.conditional[i,j])
+         for i=1:size(counts.conditional,1), j=1:size(counts.conditional,2) ],
+        map(Normal, counts.feature))
+  end
+end
+
 type Counting
-    overlap::SparseMatrixCSC{Float64,Int64}
-    classcount::Vector{Int64}
-    featurecount::Vector{Int64}
-    classoverlap::SparseMatrixCSC{Float64,Int64}
-    featureoverlap::SparseMatrixCSC{Float64,Int64}
+  shape::Data.Shape
+  disc::DiscCount
+  normal::NormalCount
+  label::Vector{Int64}
+  n::Int64
 
-    nBins::Int64
-    n::Int64
-
-    Counting(nClasses::Int64, nFeatures::Int64, maxValsPerFeat::Int64) = new(spzeros(nClasses, (nFeatures+1)*maxValsPerFeat),
-                                        zeros(nClasses),
-                                        zeros( (nFeatures+1)*maxValsPerFeat ),
-                                        spzeros(nClasses, nClasses),
-                                        spzeros(maxValsPerFeat*(nFeatures+1), maxValsPerFeat*(nFeatures+1)),
-                                        maxValsPerFeat,
-                                        0)
-
-    Counting(shape::Data.Shape) = Counting(shape.classes, shape.features, shape.unique)
-
-    Counting() = new(spzeros(0,0), Int64[], Int64[], spzeros(0,0), spzeros(0,0), 0, 0)
+  Counting(shape::Data.Shape) = new(shape,
+                                    DiscCount(shape),
+                                    NormalCount(shape),
+                                    zeros(shape.labels), 0 )
 end
 
-function merge(a::Counting,b::Counting)
-  c = Counting( length(a.classcount),
-                length(a.featurecount),
-                a.nBins, )
-  c.overlap = a.overlap + b.overlap
-  c.classcount = a.classcount + b.classcount
-  c.featurecount = a.featurecount + b.featurecount
-  c.classoverlap = a.classoverlap + b.classoverlap
-  c.featureoverlap = a.featureoverlap + b.featureoverlap
-  c.n = a.n + b.n
+type Probability
+  shape::Data.Shape
+  disc::DiscProb
+  normal::NormalProb
+  label::Vector{Float64}
 
-  return c
+  function Probability(counts::Counting)
+    new(counts.shape,
+        DiscProb(counts.disc, ./(counts.label, counts.n)),
+        NormalProb(counts.normal, ./(counts.label, counts.n)),
+        ./(counts.label, counts.n))
+  end
+end
+
+function +(a::GaussianStream, b::GaussianStream)
+  t = a.n + b.n
+  pa = a.n / t
+  pb = b.n / t
+  GaussianStream(t, pa*a.m + pb*b.m, pa*a.s + pb*b.s)
+end
+
+# Get probability
+function getp(M::Probability, v::Data.RealValue)
+  pdf(M.normal.feature[ v.index ], v.value)
+end
+
+function getp(M::Probability, label::Int64, v::Data.RealValue)
+  pdf(M.normal.conditional[ label, v.index ], v.value)
+end
+
+function getlogp(M::Probability, v::Data.RealValue)
+  logpdf(M.normal.feature[ v.index ], v.value)
+end
+
+function getlogp(M::Probability, label::Int64, v::Data.RealValue)
+  logpdf(M.normal.conditional[ label, v.index ], v.value)
+end
+
+function getp(M::Probability, v::Data.DiscValue)
+  M.disc.feature[ v.value ]
+end
+
+function getp(M::Probability, label::Int64, v::Data.DiscValue)
+  M.disc.conditional[ label, v.value ]
+end
+
+function getp(M::Probability, label::Int64, v::Data.DiscValue)
+  M.disc.conditional[ label, v.value ]
 end
 
 
-function merge!(a::Counting,b::Counting)
-  a.overlap += b.overlap
-  a.classcount += b.classcount
-  a.featurecount += b.featurecount
-  a.classoverlap += b.classoverlap
-  a.featureoverlap += b.featureoverlap
+function merge!(a::DiscCount,b::DiscCount)
+  a.conditional += b.conditional
+  a.label += b.label
+  a.feature += b.feature
   a.n += b.n
-
   return a
 end
 
+function push!(s::Counting, label::Int64, v::Data.RealValue)
+  push!(s.normal.conditional[label, v.index], v.value)
+  push!(s.normal.feature[v.index], v.value)
+end
 
-type Probability
+function push!(s::Counting, label::Int64, v::Data.DiscValue)
+  s.disc.conditional[ label, v.index ] += 1
+  s.disc.feature[ v.index ] += 1
+end
 
-    prob::SparseMatrixCSC{Float64,Int64}
-    poverlap::SparseMatrixCSC{Float64,Int64}
-    pclassoverlap::SparseMatrixCSC{Float64,Int64}
-    pclass::Vector{Float64}
-    pfeature::Vector{Float64}
-    nBins::Int64
-    pMin::Float64
+function push!(s::GaussianStream, x::Float64)
+  s.n+=1
+  if s.n==0
+    s.m = x
+    s.s = 0.
+    mean = x
+  else
+    mean = s.m + (x - s.m) / s.n
+    sd = s.s + (x - s.m)*(x - mean)
+    s.m = mean
+    s.s = sd
+  end
+end
 
-    function Probability(m::Counting)
-        extraN = estExtra(m)
-        pMin = estPMin(m, extraN)
+function var(s::GaussianStream)
+  s.n > 1 ? s.s / (s.n-1) : 0.0
+end
 
-        prob = new( spzeros( size(m.overlap,1), size(m.overlap, 2) ),
-                    spzeros( size(m.featureoverlap,1), size(m.featureoverlap,2) ),
-                    spzeros( size(m.classoverlap,1), size(m.classoverlap,2) ),
-                    zeros( size(m.classcount) ),
-                    zeros( size(m.featurecount) ),
-                    m.nBins,
-                    pMin )
+function sd(s::GaussianStream)
+  sqrt(var(s))
+end
 
-        if m.n > 0
-            I,J,V = findnz(m.overlap)
+function Normal(s::GaussianStream)
+  stdev = sd(s)
+  Normal(s.m, stdev==0 ? 1 : stdev)
+end
 
-            prob.pclass = ./(m.classcount, m.n)
-            prob.pfeature = ./(m.featurecount, m.n)
-
-            for (c, f, f_and_c) in zip(I,J,V)
-              cf_val = f_and_c / (m.classcount[c] + extraN*prob.pclass[c])
-              prob.prob[ c,f ] = isfinite(cf_val) ? cf_val : 0
-            end
-
-            I,J,V = findnz(m.featureoverlap)
-            for (i,j,v) in zip(I,J,V)
-              ij_val = v / (m.featurecount[i] + m.featurecount[j])
-              prob.poverlap[ i,j ] = isfinite(ij_val) ? ij_val : 0
-            end
-
-            I,J,V = findnz(m.classoverlap)
-            for (i,j,v) in zip(I,J,V)
-              ijv = v / (m.classcount[i] + m.classcount[j])
-              prob.pclassoverlap[ i,j ] = isfinite(ijv) ? ijv : 0
-            end
-
-        end
-
-        return prob
-    end
-
+function kl(p::GaussianStream, q::GaussianStream)
+  σ1 = sd(p)
+  σ2 = sd(q)
+  log(σ2/σ1) + ( (σ1^2 + (p.m - q.m)^2) / (2*(σ2^2)) ) - 0.5
 end
 
 # Estimate the number of examples we would need
 # to achieve full density
-function estExtra( model::Counting )
-    log(2, model.n) * (length(model.overlap) - nnz(model.overlap))
+function estExtra( model::DiscCount )
+  log(2, model.n) * (length(model.conditional) - nnz(model.conditional))
 end
 
-function estPMin( model::Counting, extra::Float64 )
-    1 / (model.n + extra)
+function estPMin( model::DiscCount, extra::Float64 )
+  1.0 / (model.n + extra)
 end
 
-function update( attrs::IntSet, pmodel::Probability, model::Counting )
-    nclasses = length(model.classcount)
-    nfeatures = length(model.featurecount)
+function update(attrs::IntSet, probs::Probability, counts::Counting )
+  shape = counts.shape
+  probs.label = ./(counts.label, counts.n)
+  probs.disc.feature = ./(counts.disc.feature, counts.n)
 
-    pmodel.pclass = ./(model.classcount, model.n)
-    pmodel.pfeature = ./(model.featurecount, model.n)
+  extraN = estExtra( counts.disc )
 
-    checkOverlap = nnz(model.featureoverlap) > 0
-    extraN = estExtra( model )
+  for a in attrs
+    attrID = shape.index[a]
+    if shape.isReal[a]
 
-    for a in attrs
+      probs.normal.feature[attrID] = Normal(counts.normal.feature[attrID])
+      for c=1:shape.labels
+        probs.normal.conditional[c,attrID] = Normal(counts.normal.conditional[c,attrID])
+      end
 
-        pmodel.pfeature[a] = model.featurecount[a] / model.n
-        for c=1:nclasses
-            ca = model.overlap[c,a] / (model.classcount[c] + extraN*pmodel.pclass[c])
-            pmodel.prob[ c, a ] = isfinite(ca) ? ca : 0
-        end
-
-        for a2=1:nfeatures
-            overlap = model.featureoverlap[a,a2]
-            if a != a2 && overlap > 0
-                newProb = overlap / (model.featurecount[a] + model.featurecount[a2])
-                if a < a2
-                    pmodel.poverlap[ a,a2 ] = isfinite(newProb) ? newProb : 0
-                else
-                    pmodel.poverlap[ a2,a ] = isfinite(newProb) ? newProb : 0
-                end
-            end
-        end
-    end
-
-    I,J,V = findnz(model.classoverlap)
-    for (i,j,v) in zip(I,J,V)
-        ij = v / (model.classcount[i] + model.classcount[j])
-        pmodel.pclassoverlap[ i,j ] = isfinite(ij) ? ij : 0
-    end
-end
-
-function project(sv::Data.Value, nBins::Int64)
-    return (sv[1]*nBins) + convert(Int64, sv[2])
-end
-
-function project(sv::Data.Value, row::Data.Row)
-    project(sv, row.nbins)
-end
-
-function project!(r::Data.Row, v::Vector{Float64}, nBins::Int64)
-  try
-    for val in r.values
-      v[ project(val, nBins) ] = 1
-    end
-  catch
-    println(STDERR, "Unable to project row ", r.num, " perhaps ", project(r.values[end], r), " > ", length(v) )
-    exit()
-  end
-end
-
-function project!(r::Data.Row, v::Vector{Float64}, nBins::Int64, targets::IntSet)
-  try
-    for val in r.values
-      t = project(val, nBins)
-      push!(targets, t)
-      v[ t ] = 1
-    end
-  catch
-    println(STDERR, "Unable to project row ", r.num, " perhaps ", project(r.values[end], r), " > ", length(v) )
-    exit()
-  end
-end
-
-# Counting model methods
-function countRow(row::Data.Row, model::Counting)
-    nclasses = size(model.classcount,1)
-    model.n += 1
-
-    for t in row.values
-        tidx = project(t,row)
-        model.featurecount[ tidx ] += 1
-
-        for c in row.labels
-            model.overlap[ c, tidx ] += 1
-        end
-    end
-
-    for c in row.labels
-        model.classcount[c] += 1
-    end
-end
-
-function countFeatureOverlaps(row::Data.Row, model::Counting)
-    n = length(row.values)
-    for i=1:n
-        iVal = project(row.values[i], model.nBins)
-        for j=i+1:n
-            model.featureoverlap[ iVal, project(row.values[j], row) ] += 1
-        end
-    end
-end
-
-function count(data::Data.Dataset, model::Counting)
-    count(Data.eachrow(data), model)
-end
-
-function count(rows::Task, model::Counting)
-    count(rows,model,false)
-end
-
-function count(rows::Task, model::Counting, includeFeatureOverlaps::Bool)
-
-    if includeFeatureOverlaps
-        for row in rows
-            countRow(row, model)
-            countFeatureOverlaps(row, model)
-        end
     else
-        for row in rows
-            countRow(row, model)
-        end
+
+      for c=1:shape.labels
+        ca = counts.disc.conditional[c, attrID] / (counts.label[c] + extraN*probs.label[c])
+        probs.disc.conditional[ c, attrID ] = isfinite(ca) ? ca : 0
+      end
+
     end
-    return model
+  end
 end
 
-function count(rows::Task, nClasses::Int64, nFeatures::Int64, maxValsPerFeat::Int64)
-    count(rows, nClasses, nFeatures, maxValsPerFeat, false)
+function push!(row::Data.Row, model::Counting)
+  model.n += 1
+  for c in row.labels
+    model.label[c] += 1
+    for v in row.values
+      push!(model, c, v)
+    end
+  end
 end
 
-function count(rows::Task, nClasses::Int64, nFeatures::Int64, maxValsPerFeat::Int64, includeFeatureOverlaps::Bool)
-    count(rows, Counting(nClasses, nFeatures, maxValsPerFeat), includeFeatureOverlaps)
+# Count to fit a Normal Distribution
+
+function merge!(dest::DiscCount, src::DiscCount)
+  for i=1:length(src.label)
+    dest.label[i] += src.label[i]
+  end
+
+  broadcast!(+, dest.feature, dest.feature, src.feature)
+
+  I,J,V = findnz(src.conditional)
+  for (i,j,v) in zip(I,J,V)
+    dest.conditional[i,j] += v
+  end
+
+  return dest
+end
+
+function merge!(dest::NormalCount, src::NormalCount)
+  broadcast!(+,dest.features, dest.features, src.features)
+  broadcast!(+,dest.conditional, dest.conditional, src.conditional)
 end
 
 function merge!(dest::Counting, src::Counting)
+  merge!(dest.disc, src.disc)
+  merge!(dest.normal, src.normal)
 
-    for i=1:length(src.classcount)
-        dest.classcount[i] += src.classcount[i]
-    end
-
-    for i=1:length(src.featurecount)
-        dest.featurecount[i] += src.featurecount[i]
-    end
-
-    I,J,V = findnz(src.overlap)
-    for (i,j,v) in zip(I,J,V)
-        dest.overlap[i,j] += v
-    end
-
-    I,J,V = findnz(src.classoverlap)
-    for (i,j,v) in zip(I,J,V)
-        dest.classoverlap[i,j] += v
-    end
-
-    I,J,V = findnz(src.featureoverlap)
-    for (i,j,v) in zip(I,J,V)
-        dest.featureoverlap[i,j] += v
-    end
-
-    dest.n += src.n
-
-    return dest
+  broadcast!(+, dest.label, dest.label, src.label)
+  dest.n += src.n
 end
 
-export count, merge!, project, project!
+export get, merge!, push!, update, var, sd, estExtra, estPMin, Normal
 end # module

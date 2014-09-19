@@ -4,115 +4,154 @@ import ..Common
 import ..Model
 import ..Data
 
+import ..Model: Probability, Counting, getlogp, estPMin, estExtra
+
+import Distributions: Normal, pdf, logpdf
+
+# For NB we transform probabilities into log probabilities
+function getlogp(M::Probability, label::Int64, v::Data.DiscValue)
+  M.disc.conditional[ label, v.index ]
+end
+
+function getlogp(M::Probability, label::Int64, v::Data.DiscValue)
+  M.disc.conditional[ label, v.index ]
+end
+
+
 typealias SparseMat SparseMatrixCSC{Float64,Int64}
 
 type Settings
-    ignorePriors::Bool
+  ignorePriors::Bool
 
-    function Settings(params::Common.Params)
-        new( get(params, "ignorePriors", false) )
-    end
+  function Settings(params::Common.Params)
+    new( get(params, "ignorePriors", true) )
+  end
 end
 
 type NB
-    shape::Data.Shape
-    counts::Model.Counting
-    settings::Settings
+  shape::Data.Shape
+  counts::Model.Counting
+  settings::Settings
 
-    NB(shape::Data.Shape, params::Common.Params) =
-        new(shape, Model.Counting(shape), Settings(params))
+  function NB(shape::Data.Shape, params::Common.Params)
+    new(shape, Model.Counting(shape), Settings(params))
+  end
 end
 
 type NBPredModel
-    pMin::Float64
-    base::Vector{Float64}
-    deltas::SparseMat
+  shape::Data.Shape
+  p::Model.Probability
+  pZero::Matrix{Float64}
+  pLabel::Vector{Float64}
 
-    rowProb::Vector{Float64}
 
-    function NBPredModel(model::NB)
-        NBPredModel(model.counts, model.settings.ignorePriors)
-    end
+  function NBPredModel(nb::NB)
+    NBPredModel(nb.counts, nb.settings.ignorePriors)
+  end
 
-    function NBPredModel(counts::Model.Counting, ignorePriors::Bool)
-        NBPredModel( Model.Probability(counts), ignorePriors)
-    end
+  function NBPredModel(counts::Model.Counting, ignorePriors::Bool)
+    shape = counts.shape
+    p = Model.Probability(counts)
+    p.disc.conditional = splog( p.disc.conditional )
+    p.label = map(log, p.label)
 
-    function NBPredModel(model::Model.Probability, ignorePriors::Bool)
-        nclasses = size(model.prob,1)
-        predModel = new(log(model.pMin), zeros(nclasses), spzeros(0,0), zeros( nclasses ))
-        update(predModel, model, ignorePriors)
-    end
+    pMin = estPMin(counts.disc, estExtra(counts.disc))
 
-end
+    pZ = zeros(shape.labels, shape.discFeatures + shape.realFeatures)
+    pB = ignorePriors ? zeros(shape.labels) : copy(p.label)
 
-function adjustProb!(probs::Vector{Float64}, features::Vector{Int64}, m::NBPredModel)
-    for c=1:size(m.deltas,1)
-        for j in features
-            cj = m.deltas[c,j]
-            probs[c] += (cj == 0) ? m.pMin : cj
+    for feature=1:(shape.discFeatures + shape.realFeatures)
+      if shape.labelAttr != feature
+        tID = shape.index[feature]
+        if shape.isReal[feature]
+
+          for label=1:shape.labels
+            pZ[label,tID] = logpdf(p.normal.conditional[label,tID], 0)
+            pB[ label ] += pZ[label,tID]
+          end
+
+        else
+
+          frng = shape.offsets[tID]:(shape.offsets[tID+1]-1)
+
+          for label=1:shape.labels
+            z = 1
+            for j=frng
+              z -= p.disc.conditional[label, j]
+            end
+            z = log(z)
+
+            pZ[label, feature] = z
+            pB[ label ] += z
+          end
+
         end
+      end
+
     end
-    return probs
+
+    new(shape, p, pZ, pB)
+  end
 end
 
-function update(pred::NBPredModel, model::Model.Probability, ignorePriors::Bool)
-  deltas = spzeros( size(model.prob,1), size(model.prob,2) )
-  pEmpty = zeros( size(model.pclass) )
+function splog(m::SparseMat)
+  lp = spzeros( size(m,1), size(m,2) )
 
-  I,J,V = findnz(model.prob)
-  for (c, f, p_f_given_c) in zip(I,J,V)
-      p_neg = log(1 - p_f_given_c)
-      pEmpty[c] += p_neg
-      deltas[c,f] = log(p_f_given_c) - p_neg
+  I,J,V = findnz(m)
+  for (i,j,v) in zip(I,J,V)
+    lp[i,j] = log(v)
   end
 
-  if !ignorePriors
-      pEmpty = .+(pEmpty, map(log, model.pclass))
-  end
-
-  pred.base = pEmpty
-  pred.deltas = deltas
-
-  return pred
+  return lp
 end
 
 function train(model::NB, data::Data.Dataset)
-    for row in Data.eachrow(data, true)
-        Model.countRow(row, model.counts)
-    end
+  for row in Data.eachrow(data)
+    Model.push!(row, model.counts)
+  end
 
-    return model
+  return model
 end
 
 function label(model::NB, params::Common.Params, stream::Task)
 
-    const produceRanks = get(params, "ranks", false)
+  const produceRanks = get(params, "ranks", false)
 
-    predModel = NBPredModel(model)
-    classRange = 1:model.shape.classes
+  predModel = NBPredModel(model)
+  classRange = 1:model.shape.labels
 
+  if produceRanks
     for row in stream
-        produce( (label(predModel, row, produceRanks), row.labels) )
+      produce( (label(predModel, row, produceRanks), row.labels) )
     end
+  else
+    for row in stream
+      produce( (label(predModel, row, produceRanks), row.labels) )
+    end
+  end
 
-    return model
+  return model
 end
 
 function label(model::NBPredModel, row::Data.Row, produceRanks::Bool)
-    # Initialize the probabilities
-    model.rowProb[1:end] = model.base
-    features = [ Model.project(V, row.nbins) for V in row.values ]
+  # Initialize the probabilities
+  p = copy(model.pLabel)
+  labelRng = 1:length(p)
 
-    # Adjust the probabilities given the observed features
-    adjustProb!(model.rowProb, features, model)
-
-    if produceRanks
-        return map((i) -> Common.Ranking(i, model.rowProb[i]), 1:length(model.rowProb))
-    else
-        return indmax(model.rowProb)
+  for v in row.values
+    for c=labelRng
+      p[c] += getlogp(model.p, c, v) - model.pZero[c, v.index]
     end
+  end
+
+
+  if produceRanks
+    return [ Common.Ranking(i, p[i]) for i=labelRng ]
+  else
+    return indmax(p)
+  end
+
 end
 
-export train, label, update, getProb, NB, NBPredModel
+export train, label, NB, NBPredModel
 end # module

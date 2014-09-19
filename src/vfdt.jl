@@ -4,97 +4,164 @@ import ..Common
 import ..Data
 import ..Model
 import ..NaiveBayes
+import DataStructures: Deque
 import ..Measures: ConfusionMatrix, gain, gini,
-                    precision,
-                    recall,
-                    sensitivity,
-                    specificity,
-                    npv,
-                    fallout,
-                    falsediscovery,
-                    missrate,
-                    accuracy,
-                    f1,
-                    mcc,
-                    informedness,
-                    markedness
+precision,
+recall,
+sensitivity,
+specificity,
+npv,
+fallout,
+falsediscovery,
+missrate,
+accuracy,
+f1,
+mcc,
+kl,
+informedness,
+markedness,
+dist,
+bhattacharyya
 
+using Distributions
+
+typealias SparseMat SparseMatrixCSC{Float64,Int64}
 
 type TreeNode
-    id::Int64
-    isNull::Bool
-    isLeaf::Bool
-    attr::Int64
-    bestG::Float64
-    epsilon::Float64
-    objective::Float64
-    low::TreeNode
-    high::TreeNode
-    parent::TreeNode
-    datashape::Data.Shape
-    m::Model.Counting
-    p::Model.Probability
-    nb::NaiveBayes.NBPredModel
-    confusion::Matrix{Float64}
+  id::Int64
+  isNull::Bool
+  attr::Int64
+  bestG::Float64
+  epsilon::Float64
+  children::Vector{TreeNode}
+  parent::TreeNode
+  shape::Data.Shape
+  m::Model.Counting
+  p::Model.Probability
+  nb::NaiveBayes.NBPredModel
+  queue::Deque{Data.Row}
 
-    ignorePriors::Bool
+  ignorePriors::Bool
 
-    depth::Int64
-    height::Int64
-    label::Int64
-    ttl::Int64
+  depth::Int64
+  height::Int64
+  label::Int64
+  ttl::Int64
 
-    traffic::Int64
+  traffic::Int64
 
-    updatedAttrs::IntSet
-    ranks::Vector{Common.Ranking}
+  updatedAttrs::IntSet
+  ranks::Vector{Common.Ranking}
 
-    function TreeNode()
-      self = new()
-      self.id=0
-      self.isNull = true
-      self.depth=0
-      self.height=0
-      self.traffic=0
+  function TreeNode()
+    self = new()
+    self.id=0
+    self.isNull = true
+    self.depth=0
+    self.height=0
+    self.traffic=0
+    self.children = TreeNode[]
+    self.epsilon=0
+    self.bestG=0
+    return self
+  end
 
-      self.epsilon=0
-      self.bestG=0
-      self.objective=0
-      return self
-    end
+  TreeNode(shape::Data.Shape) = TreeNode(TreeNode(), 0, shape, false)
+  TreeNode(shape::Data.Shape, id::Int64) = TreeNode(TreeNode(), id, shape, false)
+  TreeNode(shape::Data.Shape, ignorePriors::Bool) = TreeNode(TreeNode(), 0, shape, ignorePriors)
+  TreeNode(shape::Data.Shape, id::Int64, ignorePriors::Bool) = TreeNode(TreeNode(), id, shape, ignorePriors)
 
-    TreeNode(shape::Data.Shape) = TreeNode(TreeNode(), 0, shape, false)
-    TreeNode(shape::Data.Shape, ignorePriors::Bool) = TreeNode(TreeNode(), 0, shape, ignorePriors)
-    function TreeNode(parent::TreeNode, id::Int64, shape::Data.Shape, ignorePriors::Bool)
-        self = TreeNode()
-        self.id = id
-        self.parent = parent
-        self.depth = parent.depth + 1
-        self.datashape = shape
-        self.ignorePriors = ignorePriors
-        reset(self)
-        self.isNull = false
-        return self
-      end
+  function TreeNode(parent::TreeNode, id::Int64, shape::Data.Shape, ignorePriors::Bool)
+    self = TreeNode()
+    self.id = id
+    self.parent = parent
+    self.depth = parent.depth + 1
+    self.shape = shape
+    self.ignorePriors = ignorePriors
+    self.m = Model.Counting(shape)
+    reset(self)
+    self.isNull = false
+    return self
+  end
+end
+
+typealias NodeQueue Collections.PriorityQueue{TreeNode, Float64}
+
+type Params
+  ttl::Int64
+  delta::Float64
+  tieLimit::Float64
+  k::Float64
+  maxNodes::Int64
+  contractInterval::Int64
+  quantiles::Vector{Float64}
+  naivebayes::Bool
+  ignorePriors::Bool
+  iters::Int64
+  churn::Int64
+  graphFile::String
+  G::Function
+
+  function Params(params::Common.Params)
+    G = eval( symbol( get(params,"measure","gini") ) )
+    new(
+      get(params, "ttl", 300),
+      get(params, "delta", 0.15),
+      get(params, "tieLimit", 0.05,),
+      get(params, "k", 2),
+      clamp(get(params, "maxNodes", 256), 8, 65536), # Change this if you need...
+      get(params, "contractInterval", 1000),
+      get(params, "", [0.25,0.75]),
+      get(params, "naivebayes", true,),
+      get(params, "ignorePriors", true,),
+      get(params, "iters", 3,),
+      get(params, "churn", 100,),
+      get(params, "graphFile", "",),
+      G )
+  end
+end
+
+type HoeffdingTree
+  shape::Data.Shape
+  cost::NodeQueue
+  size::Int64
+  root::TreeNode
+  labelDist::Vector{Float64}
+  params::Params
+
+  function HoeffdingTree(shape::Data.Shape, params::Common.Params)
+    tree = new()
+    tree.params = Params(params)
+    tree.shape = shape
+    tree.cost = NodeQueue()
+    tree.size = 0
+    tree.root = TreeNode(shape, tree.params.ignorePriors)
+    tree.labelDist = zeros( shape.labels )
+    return tree
+  end
+
+end
+
+function inc(tree::HoeffdingTree)
+  tree.size += 1
+end
+
+function isLeaf(n::TreeNode)
+  length(n.children)==0
 end
 
 function reset(self::TreeNode)
-  reset(self, self.datashape)
+  reset(self, self.shape)
 end
 
 function reset(self::TreeNode, shape::Data.Shape)
 
   self.epsilon=0
-  self.objective=0
   self.isNull = true
-  self.isLeaf = true
   self.attr = -1
-  self.low = TreeNode()
-  self.high = TreeNode()
+  self.children = TreeNode[]
   self.m = Model.Counting(shape)
   self.p = Model.Probability(self.m)
-  self.nb = NaiveBayes.NBPredModel( self.p, self.ignorePriors )
-  self.confusion = zeros(shape.classes, shape.classes)
 
   self.height = 0
   self.label = 0
@@ -106,178 +173,177 @@ function reset(self::TreeNode, shape::Data.Shape)
 
 end
 
-function imbalance(m::Model.Probability, attr::Int64)
-
-  majority = indmax(m.pclass)
-  return m.pclass[majority] - m.prob[majority,attr]
-
-end
-
-typealias NodeQueue Collections.PriorityQueue{TreeNode, Float64}
-
-type Params
-    ttl::Int64
-    delta::Float64
-    tieLimit::Float64
-    maxNodes::Int64
-    contractInterval::Int64
-    minTraffic::Float64
-    naivebayes::Bool
-    ignorePriors::Bool
-    iters::Int64
-    G::Function
-
-    function Params(params::Common.Params)
-        G = eval( symbol( get(params,"measure","gini") ) )
-        new(
-            get(params, "ttl", 10),
-            get(params, "delta", 0.005),
-            get(params, "tieLimit", 0.005,),
-            clamp(get(params, "maxNodes", 512), 8, 65536), # Change this if you need...
-            get(params, "contractInterval", 1000),
-            get(params, "minTraffic", 60),
-            get(params, "naivebayes", true,),
-            get(params, "ignorePriors", true,),
-            get(params, "iters", 3,),
-            G )
-    end
-end
-
-type HoeffdingTree
-    shape::Data.Shape
-    goodness::NodeQueue
-    cost::NodeQueue
-    counter::Int64
-    root::TreeNode
-    params::Params
-    function HoeffdingTree(shape::Data.Shape, params::Common.Params)
-      tree_params = Params(params)
-      root = TreeNode(shape, tree_params.ignorePriors)
-      root.isNull = false
-      new(shape, NodeQueue(), NodeQueue(), 0, root, tree_params)
-    end
-end
-function nodeLabel(node)
-    top = 1
-    topCount=0
-    for i=1:length(m.classcount)
-        if m.classcount[i] > topCount
-            topCount = m.classcount[i]
-            top = i
-        end
-    end
-end
-
 function print(tree::HoeffdingTree)
-  println("digraph G{")
-  print(tree.root,"")
-  println("}")
+  print(STDOUT, tree)
 end
 
-function print(node::TreeNode, prefix::String)
+function print(S::IO, tree::HoeffdingTree)
+  println(S,"digraph G{")
+  print(S, tree.root,"T")
+  println(S,"}")
+end
+
+function print(S::IO, node::TreeNode, path::String)
   if !node.isNull
-    println(node.id, " [label=\"", node.id,":", node.traffic,"\" weight=\"", node.traffic,"\"];")
-    if !node.isLeaf
-      print(node.low,"0:")
-      print(node.high,"1:")
-      println(node.id, " -> ", node.high.id, ";")
-      println(node.id, " -> ", node.low.id, ";")
+
+    if isLeaf(node)
+      node.label = indmax( node.m.label )
+
+      println(S, path, " [label=\"", node.shape.labelStrings[ node.label ],"\" weight=\"", node.traffic,"\"];")
+    else
+      println(S, path, " [label=\"", node.shape.names[ node.attr ],":", node.traffic,"\" weight=\"", node.traffic,"\"];")
+    end
+
+    i=0
+    for c in node.children
+      i += 1
+      cn = "$(path)_$(i)"
+      print(S, c, cn)
+      println(S, path, " -> ", cn, " [ label = $i];")
     end
   end
 end
 
 function visitParents(node::TreeNode)
-    if !node.parent.isNull
-        produce(node.parent)
-        visitParents(node.parent)
-    end
+  if !node.parent.isNull
+    produce(node.parent)
+    visitParents(node.parent)
+  end
 end
 
 function visitChildren(node::TreeNode)
-    if !node.isLeaf
-        produce(node.low)
-        produce(node.high)
-        if !node.low.isNull
-            visitChildren(node.low)
-        end
-        if !node.high.isNull
-            visitChildren(node.high)
-        end
-    end
+  @task visitChildrenTask(node)
+end
+
+function visitChildrenTask(node::TreeNode)
+  for c in node.children
+    produce(c)
+  end
+
+  for c in node.children
+    visitChildrenTask(c)
+  end
 end
 
 function visitLeaves(node::TreeNode)
-    if node.isLeaf
-        produce(node)
-    else
-        visitLeaves(node.low)
-        visitLeaves(node.high)
+  @task visitLeavesTask(node)
+end
+
+function visitLeavesTask(node::TreeNode)
+  if isLeaf(node)
+    produce(node)
+  else
+    for c in node.children
+      visitLeavesTask(c)
     end
+  end
 end
 
 function getVisitor(node::TreeNode)
-    return @task visitChildren(node)
+  return @task visitChildren(node)
 end
 
 function getLeafVisitor(node::TreeNode)
-    return @task visitLeaves(node)
+  return @task visitLeaves(node)
 end
 
 function getParentVisitor(node::TreeNode)
-    return @task visitParents(node)
+  return @task visitParents(node)
 end
 
-function sortToLeaf(node, vec)
+function getChildIndex(shape::Data.Shape, v::Data.DiscValue)
+  v.value - shape.offsets[v.index]
+end
 
-    node.traffic += 1
+function getChildIndex(dist::Model.Normal, q::Vector{Float64}, v::Data.RealValue)
+  qval = cdf( dist, v.value )
 
-    if node.isLeaf
-        return node
-    else
-        assert(!node.low.isNull)
-        assert(!node.high.isNull)
-
-        if vec[node.attr] == 0.0
-            return sortToLeaf(node.low,  vec)
-        else
-            return sortToLeaf(node.high, vec)
-        end
+  if qval > 0.5
+    i=length(q)+1
+    while q[i-1] > qval
+      i-=1
     end
-end
-
-function prevAttrs(node::TreeNode)
-    r = IntSet()
-    p = node.parent
-    while !p.isNull
-        push!(r, p.attr)
-        p = p.parent
+  else
+    i=0
+    while q[i+1] < qval
+      i+=1
     end
-    return r
-end
-
-function objective(tree::HoeffdingTree, node::TreeNode)
-
-  const ignorePriors = tree.params.ignorePriors
-
-  g = 0.0
-
-  real_col = sum(node.confusion, 1)
-  pred_row = sum(node.confusion, 2)
-
-  for i=1:tree.shape.classes
-    M = ConfusionMatrix()
-    M.tp = node.confusion[i,i]
-    M.tn = sum(node.confusion) - M.tp
-    M.fp = pred_row[i] - M.tp
-    M.fn = real_col[i] - M.tp
-    fi = tree.params.F(M)
-    g += ignorePriors ? fi : fi *  node.p.pclass[i]
   end
-  return g/tree.shape.classes * log(node.traffic)
+
+  return i
 end
+
+function isLeaf(node::TreeNode)
+  length(node.children) == 0
+end
+
+function rowIndex(row::Data.Row)
+  vec = Dict{Int64, Data.Value}()
+
+  for p in row.values
+    vec[ p.feature ] = p
+  end
+
+  return vec
+end
+
+function sortToLeaf(node::TreeNode, q::Vector{Float64}, rIndex::Dict{Int64,Data.Value})
+
+  node.traffic += 1
+
+  if length(node.children)==0
+    return node
+  else
+
+    if haskey( rIndex, node.attr )
+
+      v = rIndex[node.attr]
+      if isa(v, Data.RealValue)
+        idx = getChildIndex( node.p.normal.feature[ v.index ], q, v )
+      else
+        idx = getChildIndex( node.p.shape, v )
+      end
+
+      return sortToLeaf(node.children[idx], q, rIndex)
+    else
+      return sortToLeaf(node.children[1], q, rIndex)
+    end
+
+  end
+end
+
+function countToLeaf!(tree::HoeffdingTree, row::Data.Row)
+  countToLeaf!(tree.root, tree.params.quantiles, row, rowIndex(row))
+end
+
+function countToLeaf!(node::TreeNode, q::Vector{Float64}, row::Data.Row, rIndex::Dict{Int64,Data.Value})
+
+  node.traffic += 1
+
+  Model.push!(row, node.m)
+
+  if length(node.children)==0
+    return node
+  else
+
+    if haskey( rIndex, node.attr )
+
+      v = rIndex[node.attr]
+      if isa(v, Data.RealValue)
+        idx = getChildIndex( node.p.normal.feature[ v.index ], q, v )
+      else
+        idx = getChildIndex( node.p.shape, v )
+      end
+
+      return countToLeaf!(node.children[idx], q, row, rIndex)
+    else
+      return countToLeaf!(node.children[1], q, row, rIndex)
+    end
+  end
+end
+
 
 function setMeasures(tree::HoeffdingTree, node::TreeNode)
-  tree.goodness[node] = node.objective * node.traffic
   tree.cost[node] = node.bestG * node.traffic
 end
 
@@ -288,194 +354,148 @@ end
 
 function splitLeaf(tree::HoeffdingTree, node::TreeNode, onAttr::Int64, epsilon::Float64)
 
-    if !node.parent.isNull
-      clearMeasures(tree, node.parent)
-    end
-    setMeasures(tree, node)
+  if !node.parent.isNull
+    clearMeasures(tree, node.parent)
+  end
+  setMeasures(tree, node)
 
-    # Clean out old objects
-    node.p = Model.Probability( Model.Counting( node.datashape ) )
-    node.updatedAttrs = IntSet()
-    node.height = 1
+  if tree.shape.isReal[ onAttr ]
+    nChildren = length(tree.params.quantiles) + 1
+  else
+    nChildren = tree.params.widths[ tree.params.index[onAttr] ]
+  end
 
-    for n in getParentVisitor(node)
-        n.height = max(n.low.height, n.high.height) + 1
-    end
+  node.children = [ TreeNode(tree.shape, inc(tree), tree.params.ignorePriors) for i=1:nChildren ]
 
-    node.isLeaf = false
-    node.attr = onAttr
-    node.epsilon = epsilon
+  # Clean out old objects
+  node.p = Model.Probability( Model.Counting( node.shape ) )
+  node.updatedAttrs = IntSet()
+  node.height = 1
 
-    tree.counter += 1
-    node.low  = TreeNode(node, tree.counter, node.datashape, tree.params.ignorePriors)
-    tree.counter += 1
-    node.high = TreeNode(node, tree.counter, node.datashape, tree.params.ignorePriors)
+  for n in getParentVisitor(node)
+    n.height = maximum([ c.height for c in c.children ]) + 1
+  end
 
-    node.low.depth = node.depth + 1
-    node.high.depth = node.depth + 1
+  node.attr = onAttr
+  node.epsilon = epsilon
 
 end
 
-function trafficBalance(node::TreeNode)
-  n = node.low.traffic + node.high.traffic
-  2*min(node.low.traffic + node.high.traffic) / n
+function prune!(tree::HoeffdingTree)
+  cnt = 0
+  prune!(tree.root)
+  for n in visitChildren(tree.root)
+    cnt += 1
+    n.id = cnt
+  end
+  tree.size = cnt
 end
 
-function contract!(tree::HoeffdingTree, node::TreeNode, minTraffic::Float64)
-  if !node.isLeaf
-    if min(node.low.traffic, node.high.traffic) < minTraffic
+function prune!(node::TreeNode)
 
-      if node.low.traffic < node.high.traffic
-        collapseNode(tree, node.low)
-        rt = node.high
-        deadnode = node.low
-      else
-        collapseNode(tree, node.high)
-        rt = node.low
-        deadnode = node.high
+  if !isLeaf(node)
+
+    trafficBalance = [ c.traffic for c in node.children ]
+
+    if maximum(trafficBalance) == sum(trafficBalance)
+      # No real decision is being made here
+      for c in node.children
+        reset(c)
+        c.parent = TreeNode()
       end
 
-      contract!(tree, rt, minTraffic)
-
-      if rt.isLeaf
-        collapseNode(tree, node)
-      else
-        Model.merge!(node.m, node.high.m)
-        Model.merge!(node.m, node.low.m)
-        reset(deadnode)
-        node.attr = rt.attr
-        node.low = rt.low
-        node.low.parent = node
-        node.high = rt.high
-        node.high.parent = node
-        rt.low = TreeNode()
-        rt.high = TreeNode()
-      end
-
+      node.children = TreeNode[]
+      node.attr = 0
+      node.label = indmax(node.m.label)
     else
-      contract!(tree, node.low, minTraffic)
-      contract!(tree, node.high, minTraffic)
-    end
-  end
-end
-
-function collapseNode(tree::HoeffdingTree, node::TreeNode)
-
-    if !node.isLeaf
-
-        node.updatedAttrs = IntSet()
-
-        if !node.low.isLeaf
-          collapseNode(tree, node.low)
-          Model.merge!(node.m, node.low.m)
-        end
-
-        if !node.high.isLeaf
-          collapseNode(tree, node.high)
-          Model.merge!(node.m, node.high.m)
-        end
-
-        if !node.parent.isNull
-          setMeasures(tree, node.parent)
-        end
-        clearMeasures(tree, node)
-
-        node.attr=0
-        node.isLeaf = true
-
-        reset(node.low)
-        node.low = TreeNode()
-        reset(node.high)
-        node.high = TreeNode()
-
-    end
-end
-
-function updateLeafPredictions(tree::HoeffdingTree, node::TreeNode, row::Data.Row, params::Params)
-
-  vecLabel = node.label
-  if params.naivebayes
-    if node.ttl == 0
-      # node.p was updated in updateLeaf
-      NaiveBayes.update(node.nb, node.p, params.ignorePriors)
+      for c in node.children
+        prune!(c)
+      end
     end
 
-    vecLabel = NaiveBayes.label(node.nb, row, false)
   end
 
-  for l in row.labels
-    node.confusion[vecLabel, l]
-  end
-
-  node.objective = objective(tree,node)
 end
+
 
 #
 #   This is the inner loop of the VFDT where we decide to split the leaf
 #       if needed.
 #
-function updateLeaf(tree::HoeffdingTree, leaf::TreeNode, ttl::Float64, params::Params, force::Bool)
+function updateLeaf(tree::HoeffdingTree,
+                    leaf::TreeNode,
+                    ttl::Float64,
+                    params::Params,
+                    force::Bool )
 
-    leaf.ttl += 1
+  shape = tree.shape
+  leaf.ttl += 1
 
-    if leaf.ttl >= ttl && leaf.traffic > params.minTraffic
+  if leaf.ttl >= ttl && length(leaf.updatedAttrs) > 1
 
-      pc = 0.0
-      for i=1:size(leaf.p.pclass,1)
-          if leaf.p.pclass[i] > pc
-              pc = leaf.p.pclass[i]
-              leaf.label = i
-          end
+    treeDist = ./(tree.labelDist, sum(tree.labelDist))
+
+    leaf.label = indmax(leaf.p.label)
+    leaf.ttl = 0
+    Model.update(leaf.updatedAttrs, leaf.p, leaf.m)
+
+    # Now loop over attributes and find the best 2 attributes
+    bestAttr = 0
+    nextBestAttr = 0
+    bestG = 0
+    nextG = 0
+    nQ = length( tree.params.quantiles )
+    labelRng = 1:tree.shape.labels
+
+    pLabel = ./(leaf.m.label, sum(leaf.m.label))
+    labelWeight = .-(1, pLabel)
+    attrWeights = (Float64,Int64,)[]
+
+    for n in leaf.updatedAttrs
+      nID = shape.index[n]
+
+      if shape.isReal[n]
+        attrDist = [ Model.kl(leaf.m.normal.conditional[c,nID],
+                              leaf.m.normal.feature[nID])
+                    for c=labelRng ]
+      else
+
+        iFirst = shape.offsets[nID]
+        iLast = shape.widths[nID] + iFirst
+
+        attrDist = [ kl(leaf.m.disc.conditional[c,iFirst:iLast],
+                        leaf.m.disc.feature[iFirst:iLast], true)
+                    for c=labelRng ]
       end
 
-      leaf.ttl = 0
-      Model.update(leaf.updatedAttrs, leaf.p, leaf.m)
-      ignoreAttrs = prevAttrs(leaf)
-
-      # Now loop over attributes and find the best 2 attributes
-      bestAttr = 0
-      nextBestAttr = 0
-      bestG = 0
-      nextG = 0
-
-      for n in setdiff(leaf.updatedAttrs, ignoreAttrs)
-        nG = params.G(leaf.p, n)
-
-        if nG > bestG
-            nextG = bestG
-            nextBestAttr = bestAttr
-            bestG = nG
-            bestAttr = n
-        elseif nG > nextG
-            nextG = nG
-            nextBestAttr = n
-        end
-
-      end
-
-      if bestAttr != 0
-
-        epsilon = sqrt( log(1/params.delta) / (2 * leaf.m.n)  )
-        gradient = bestG - nextG
-
-        leaf.epsilon = epsilon
-        leaf.bestG = bestG
-
-        if gradient > params.delta || gradient < params.tieLimit
-            splitLeaf(tree, leaf, bestAttr, epsilon)
-        end
-
-      end
-
+      broadcast!((x)-> isfinite(x) ? x : 0.0, attrDist, attrDist)
+      push!( attrWeights, (sum( .*(labelWeight, attrDist) ), n,) )
     end
+
+    sort!(attrWeights, rev=true)
+
+    bestG = attrWeights[1][1]
+    bestAttr = attrWeights[1][2]
+
+    epsilon = sqrt( log(1/params.delta) / (2 * leaf.m.n)  )
+    gradient = bestG - attrWeights[2][1]
+
+    leaf.epsilon = epsilon
+    leaf.bestG = bestG
+
+    if gradient > params.delta || gradient < params.tieLimit
+      splitLeaf(tree, leaf, bestAttr, epsilon)
+    end
+
+  end
 end
 
 function updateLeaf(tree::HoeffdingTree, node::TreeNode, ttl::Float64, params::Params)
-    updateLeaf(tree, node, ttl, params, false)
+  updateLeaf(tree, node, ttl, params, false)
 end
 
 function updateLeaf(tree::HoeffdingTree, node::TreeNode, params::Params)
-    updateLeaf(tree, node, params.ttl, params, false)
+  updateLeaf(tree, node, params.ttl, params, false)
 end
 
 #
@@ -483,15 +503,10 @@ end
 #
 function routeAndCount(stream::Task, tree::HoeffdingTree)
 
-    for l in @task visitLeaves(tree.root)
-        l.m = spzeros(size(l.m,1), size(l.m,2))
-    end
-
-    for r in stream
-        l = sortToLeaf(tree.root, r)
-        Model.countRow(r, l.m)
-        Model.countFeatureOverlaps(r, l.m)
-    end
+  for r in stream
+    l = sortToLeaf(tree.root, tree.params.quantiles, rowIndex(r))
+    Model.push!(r, l.m)
+  end
 
 end
 
@@ -501,99 +516,96 @@ end
 
 # Training is simple
 function train(tree::HoeffdingTree, data::Data.Dataset)
-    nbins = tree.shape.unique
-    tmpVec = zeros( (tree.shape.features+1) * nbins )
 
-    contractionCounter=tree.params.contractInterval
+  treeTooBig = false
 
-    for iterNum=1:tree.params.iters
+  for iterNum=1:tree.params.iters
 
-      for row in Data.eachrow(data, true)
-
-          fill!(tmpVec,0)
-          Model.project!(row, tmpVec, nbins)
-
-          leaf = sortToLeaf(tree.root, tmpVec)
-          Model.countRow(row, leaf.m)
-          for v in row.values
-            push!(leaf.updatedAttrs, Model.project(v, row.nbins))
-          end
-
-          updateLeaf(tree, leaf, tree.params.ttl + ttl_decay(row.num), tree.params)
-          #updateLeafPredictions(tree, leaf, row, tree.params)
-
-          while length( tree.cost ) > 0 && Collections.peek( tree.cost )[2] < 0
-            Collections.dequeue!( tree.cost )
-          end
-
-          while length( tree.cost ) > tree.params.maxNodes
-            dq = Collections.dequeue!( tree.cost )
-            if !dq.isNull && !dq.parent.isNull
-              collapseNode(tree, dq)
-            end
-          end
-
-          contractionCounter -= 1
-          if contractionCounter == 0
-            contract!(tree, tree.root, tree.params.minTraffic)
-            contractionCounter = tree.params.contractInterval
-          end
-      end
-      println(STDERR, "Done with iter $(iterNum)")
+    rowProvider = Data.eachrow(data)
+    if tree.params.churn > 0
+      rowProvider = Data.churn(rowProvider, tree.params.churn)
     end
-    contract!(tree, tree.root, tree.params.minTraffic)
 
-    return tree
+    for row in rowProvider
+
+      for n in row.labels
+        tree.labelDist[n] += 1
+      end
+
+      leaf = countToLeaf!(tree, row)
+
+      if !treeTooBig && tree.size < tree.params.maxNodes
+
+        for v in row.values
+          push!(leaf.updatedAttrs, v.feature)
+        end
+
+        preSize = tree.size
+        updateLeaf(tree, leaf, tree.params.ttl + ttl_decay(row.num), tree.params)
+
+        if tree.size > tree.params.maxNodes
+          prune!(tree)
+          println(STDERR, "Sizes ",preSize,"/",tree.size," pre/post", )
+
+          if tree.size >= preSize
+            treeTooBig = true
+            break
+          end
+
+        end
+
+      end
+    end
+
+    println(STDERR, "Done with iter $(iterNum)")
+  end
+
+  println(STDERR, "Building stats")
+  routeAndCount(Data.eachrow(data), tree)
+
+  if length(tree.params.graphFile) > 0
+    open(tree.params.graphFile, "w") do f
+      print(f, tree)
+      println(STDERR, "Graphviz file written")
+    end
+  end
+
+  return tree
 end
 
 function label(tree::HoeffdingTree, params::Common.Params, stream::Task)
 
-    nbins = tree.shape.unique
-    const naiveBayesLeaves = tree.params.naivebayes
-    const produceRanks = get(params, "ranks", false)
+  const naiveBayesLeaves = tree.params.naivebayes
+  const produceRanks = get(params, "ranks", false)
 
-    #   Setup the leaves for prediction
-    for leaf in getLeafVisitor(tree.root)
-        leaf.p = Model.Probability(leaf.m)
-        if naiveBayesLeaves
-          leaf.nb = NaiveBayes.NBPredModel(leaf.p, tree.params.ignorePriors)
-        end
-        leaf.label = indmax(leaf.p.pclass)
-
-        if produceRanks
-          rnks = map((i) -> Common.Ranking(i, leaf.p.pclass), 1:size(leaf.p.pclass))
-          sort!(rnks, by=(x) -> -x.value)
-          leaf.ranks = rnks
-        end
-    end
-
-    rowAsVec = zeros( (tree.shape.features+1) * nbins )
+  #   Setup the leaves for prediction
+  for leaf in visitLeaves(tree.root)
+    leaf.p = Model.Probability(leaf.m)
     if naiveBayesLeaves
-
-      for row in stream
-        fill!(rowAsVec,0)
-        Model.project!(row, rowAsVec, nbins)
-        row_leaf = sortToLeaf(tree.root, rowAsVec)
-        produce( (NaiveBayes.label(row_leaf.nb, row, produceRanks), row.labels) )
-      end
-
-    else
-
-      # Do the actual labelling
-      if produceRanks
-        for row in stream
-          fill!(rowAsVec,0)
-          Model.project!(row, rowAsVec, nbins)
-          produce( (sortToLeaf(tree.root, rowAsVec).ranks, row.labels)  )
-        end
-      else
-        for row in stream
-          fill!(rowAsVec,0)
-          Model.project!(row, rowAsVec, nbins)
-          produce( (sortToLeaf(tree.root, rowAsVec).label, row.labels)  )
-        end
-      end
+      leaf.nb = NaiveBayes.NBPredModel(leaf.m, tree.params.ignorePriors)
     end
+    leaf.label = indmax(leaf.p.label)
+
+    if produceRanks
+      rnks = map((i) -> Common.Ranking(i, leaf.p.label), 1:size(leaf.shape.labels))
+      sort!(rnks, by=(x) -> -x.value)
+      leaf.ranks = rnks
+    end
+  end
+
+  for row in stream
+    row_leaf = sortToLeaf( tree.root, tree.params.quantiles, rowIndex(row) )
+
+    if naiveBayesLeaves
+      produce( (NaiveBayes.label(row_leaf.nb, row, produceRanks), row.labels) )
+    elseif produceRanks
+      produce( (row_leaf.ranks, row.labels)  )
+    else
+      produce( (row_leaf.label, row.labels)  )
+    end
+
+  end
+
 end
 
 export train, label, HoeffdingTree
