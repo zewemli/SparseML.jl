@@ -32,9 +32,7 @@ type DiscProb
   pMin::Float64
 
   function DiscProb(m::DiscCount, n::Int64, pLabel::Vector{Float64})
-
     m.n = n
-
     prob = new( m.shape,
                zeros(size(m.conditional)),
                zeros(size(m.feature)),
@@ -117,7 +115,7 @@ type Probability
     new(counts.shape,
         DiscProb(counts.disc, counts.n, ./(counts.label, counts.n)),
         NormalProb(counts.normal, ./(counts.label, counts.n)),
-        ./(counts.label, counts.n))
+        ./(counts.label, counts.n) )
   end
 end
 
