@@ -17,8 +17,8 @@ type DiscCount
 
   function DiscCount(shape::Data.Shape)
     new(shape,
-        spzeros(shape.labels, shape.discFeatures),
-        zeros(shape.offsets[end]),
+        spzeros(shape.labels, shape.discWidth),
+        zeros(shape.discWidth),
         0)
   end
 
@@ -31,20 +31,27 @@ type DiscProb
   feature::Vector{Float64}
   pMin::Float64
 
-  function DiscProb(m::DiscCount, pLabel::Vector{Float64})
+  function DiscProb(m::DiscCount, n::Int64, pLabel::Vector{Float64})
+
+    m.n = n
 
     prob = new( m.shape,
-               similar(m.conditional),
-               similar(m.feature),
+               zeros(size(m.conditional)),
+               zeros(size(m.feature)),
                estPMin(m, estExtra(m)) )
 
-    if m.n > 0
-      I,J,V = findnz(m.conditional)
+    extraN = estExtra( m )
+    assert(extraN >= 0)
 
+    labelCnt = sum(m.conditional, 2)
+    pLabel = ./(labelCnt, sum(labelCnt))
+
+    if m.n > 0
       prob.feature = ./(m.feature, m.n)
 
+      I,J,V = findnz(m.conditional)
       for (c, f, f_and_c) in zip(I,J,V)
-        cf_val = f_and_c / (m.label[c] + extraN*pLabel[c])
+        cf_val = f_and_c / (labelCnt[c] + extraN*pLabel[c])
         prob.conditional[ c,f ] = isfinite(cf_val) ? cf_val : 0
       end
     end
@@ -108,7 +115,7 @@ type Probability
 
   function Probability(counts::Counting)
     new(counts.shape,
-        DiscProb(counts.disc, ./(counts.label, counts.n)),
+        DiscProb(counts.disc, counts.n, ./(counts.label, counts.n)),
         NormalProb(counts.normal, ./(counts.label, counts.n)),
         ./(counts.label, counts.n))
   end
@@ -165,8 +172,8 @@ function push!(s::Counting, label::Int64, v::Data.RealValue)
 end
 
 function push!(s::Counting, label::Int64, v::Data.DiscValue)
-  s.disc.conditional[ label, v.index ] += 1
-  s.disc.feature[ v.index ] += 1
+  s.disc.conditional[ label, v.value ] += 1
+  s.disc.feature[ v.value ] += 1
 end
 
 function push!(s::GaussianStream, x::Float64)
@@ -205,7 +212,11 @@ end
 # Estimate the number of examples we would need
 # to achieve full density
 function estExtra( model::DiscCount )
-  log(2, model.n) * (length(model.conditional) - nnz(model.conditional))
+  if model.n > 0
+    return log(2, model.n) * (length(model.conditional) - nnz(model.conditional))
+  else
+    return 0.0
+  end
 end
 
 function estPMin( model::DiscCount, extra::Float64 )

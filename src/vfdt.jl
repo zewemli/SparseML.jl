@@ -103,19 +103,19 @@ type Params
   G::Function
 
   function Params(params::Common.Params)
-    G = eval( symbol( get(params,"measure","gini") ) )
+    G = eval( symbol( get(params,"measure","gain") ) ) # NOT USED
     new(
       get(params, "ttl", 300),
       get(params, "delta", 0.15),
       get(params, "tieLimit", 0.05,),
-      get(params, "k", 2),
-      clamp(get(params, "maxNodes", 256), 8, 65536), # Change this if you need...
+      get(params, "k", 2), # NOT USED
+      clamp(get(params, "maxNodes", 1024), 8, 65536), # Change this if you need...
       get(params, "contractInterval", 1000),
-      get(params, "", [0.25,0.75]),
+      get(params, "quantiles", [0.25,0.5,0.75]),
       get(params, "naivebayes", true,),
       get(params, "ignorePriors", true,),
       get(params, "iters", 3,),
-      get(params, "churn", 100,),
+      get(params, "churn", 250,),
       get(params, "graphFile", "",),
       G )
   end
@@ -259,15 +259,19 @@ function getChildIndex(dist::Model.Normal, q::Vector{Float64}, v::Data.RealValue
   qval = cdf( dist, v.value )
 
   if qval > 0.5
-    i=length(q)+1
-    while q[i-1] > qval
+
+    i = length(q) + 1
+    while qval < q[i-1]
       i-=1
     end
+
   else
-    i=0
-    while q[i+1] < qval
+
+    i=1
+    while qval > q[i]
       i+=1
     end
+
   end
 
   return i
@@ -331,8 +335,10 @@ function countToLeaf!(node::TreeNode, q::Vector{Float64}, row::Data.Row, rIndex:
       v = rIndex[node.attr]
       if isa(v, Data.RealValue)
         idx = getChildIndex( node.p.normal.feature[ v.index ], q, v )
+        assert(idx != 0)
       else
         idx = getChildIndex( node.p.shape, v )
+        assert(idx != 0)
       end
 
       return countToLeaf!(node.children[idx], q, row, rIndex)
@@ -362,7 +368,7 @@ function splitLeaf(tree::HoeffdingTree, node::TreeNode, onAttr::Int64, epsilon::
   if tree.shape.isReal[ onAttr ]
     nChildren = length(tree.params.quantiles) + 1
   else
-    nChildren = tree.params.widths[ tree.params.index[onAttr] ]
+    nChildren = tree.shape.widths[ tree.shape.index[onAttr] ]
   end
 
   node.children = [ TreeNode(tree.shape, inc(tree), tree.params.ignorePriors) for i=1:nChildren ]
@@ -460,12 +466,11 @@ function updateLeaf(tree::HoeffdingTree,
                     for c=labelRng ]
       else
 
-        iFirst = shape.offsets[nID]
-        iLast = shape.widths[nID] + iFirst
-
-        attrDist = [ kl(leaf.m.disc.conditional[c,iFirst:iLast],
-                        leaf.m.disc.feature[iFirst:iLast], true)
+        iRng = shape.ranges[nID]
+        attrDist = [ kl(leaf.m.disc.conditional[c,iRng],
+                        leaf.m.disc.feature[iRng], true)
                     for c=labelRng ]
+
       end
 
       broadcast!((x)-> isfinite(x) ? x : 0.0, attrDist, attrDist)
@@ -551,16 +556,14 @@ function train(tree::HoeffdingTree, data::Data.Dataset)
             treeTooBig = true
             break
           end
-
         end
-
       end
     end
 
     println(STDERR, "Done with iter $(iterNum)")
   end
 
-  println(STDERR, "Building stats")
+  println(STDERR, "Building stats, tree size ", tree.size)
   routeAndCount(Data.eachrow(data), tree)
 
   if length(tree.params.graphFile) > 0

@@ -257,14 +257,17 @@ end
 function kl(p, q, norm::Bool)
   p = ./(p,sum(p))
   q = ./(q,sum(q))
-  kl(p,q)
+
+  if size(p) == size(q)
+    return kl(p,q)
+  else
+    return kl(p,reshape(q,size(p)))
+  end
 end
 
 function kl(p, q)
   sum( .*(log(./(p,q)), p) )
 end
-
-
 
 function npmi(m::Model.Probability, byClass::Bool)
   M = byClass ? m.prob : m.poverlap

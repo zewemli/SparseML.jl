@@ -94,17 +94,19 @@ function main()
 
   testingFiles = get(flags, "label", [])
   if length( testingFiles ) > 0
-    println(STDERR,"Started testing")
+    println(STDERR,"Started testing ")
     start = time()
     testingData = Data.Dataset(testingFiles, logMap, verbose)
+
     labelingTask = label(model, params, Data.eachrow(testingData))
+
     outfile = STDOUT
     if flags["pred"] != nothing
       pred_name = flags["pred"]
       outfile = open(pred_name, "w")
-      print(STDERR," writing to $(pred_name)")
+      print(STDERR," writing to $(pred_name) ")
     else
-      print(STDERR," writing to stdout")
+      print(STDERR," writing to stdout ")
     end
 
     # This doesn't work with ranking...
@@ -113,7 +115,6 @@ function main()
       matrix = zeros( testingData.shape.labels, testingData.shape.labels )
 
       const write_preds = flags["pred"] != nothing
-
       for lbl in labelingTask
         if write_preds
           writeLabel(lbl[1], lbl[2], outfile)
@@ -127,14 +128,17 @@ function main()
 
       println("Confusion matrix")
       for i=1:testingData.shape.labels
+
         print(STDOUT,matrix[i,1])
         for j=2:testingData.shape.labels
           print(STDOUT,",",matrix[i,j])
         end
         print(STDOUT,"\n")
+
       end
 
     else
+
 
       for lbl in labelingTask
         writeLabel(lbl[1], lbl[2], outfile)
@@ -143,7 +147,7 @@ function main()
     end
 
     delta = time() - start
-    println(STDERR," done in $(delta) seconds")
+    println(STDERR,"done in $(delta) seconds")
 
   end
 

@@ -1,15 +1,15 @@
 module Data
 
 type RealValue
-  feature::Int64
-  index::Int64
-  value::Float64
+  feature::Int64 # Feature in dataset
+  index::Int64   # Feature index w.r.t. discrete data structures
+  value::Float64 # unique index for feature value with discrete data structures
 end
 
 type DiscValue
-  feature::Int64
-  index::Int64
-  value::Int64
+  feature::Int64 # Feature in dataset
+  index::Int64   # Feature index w.r.t. discrete data structures
+  value::Int64   # unique index for feature value with discrete data structures
 end
 
 type DisceteValueOutOfRange <: Exception end
@@ -48,6 +48,7 @@ type Shape
   levels::Vector{Dict{String,Int64}} # Levels of a discrete attribute
   names::Vector{String} # Names of the attributes (applies to all)
   offsets::Vector{Int64} # Only applies to discrete features
+  ranges::Vector{UnitRange{Int64}} # Gives the range for indices into discrete structures
   realFeatures::Int64 # Number of real features
   widths::Vector{Int64} # Only applies to discrete features
 
@@ -64,6 +65,7 @@ type Shape
                 Dict{String,Int64}[],
                 String[],
                 Int64[],
+                UnitRange{Int64}[],
                 0,
                 Int64[])
 end
@@ -124,7 +126,7 @@ function datShape(ds::Dataset, f::IO)
   if beginswith(l, "#")
     # expecting "# Shape {1,2} (3,3,5,6)"
     sizes = map(parseint, split(l[ searchindex(a,"{")+1 : rsearchindex(a,"}")-1 ], ","))
-    shape.offsets = Int64[1]
+    shape.offsets = Int64[0]
     shape.labels = sizes[1]
     shape.labelStrings = [ "$(i)" for i=1:shape.labels ]
 
@@ -148,9 +150,13 @@ function datShape(ds::Dataset, f::IO)
         else
           # Is disc
           discI += 1
+          pEnd = shape.offsets[end]
+
           push!(shape.isIntAttr, true)
           push!(shape.widths, w)
-          push!(shape.offsets, shape.offsets[end]+w)
+          push!(shape.offsets, pEnd+w)
+          push!(shape.ranges, (pEnd+1):(pEnd+w))
+
         end
 
         push!(shape.index, (w == 0) ? realI : discI)
@@ -170,7 +176,7 @@ end
 
 function arffShape(ds::Dataset, f::IO)
   shape = Shape()
-  shape.offsets = Int64[1]
+  shape.offsets = Int64[0]
 
   nlabels=0
   maxn = 0
@@ -196,7 +202,7 @@ function arffShape(ds::Dataset, f::IO)
         discI += 1
 
         for v in split(l[ searchindex(l,"{")+1 : rsearchindex(l,"}")-1 ], ",")
-          discVals[ strip(v) ] = length(discVals)
+          discVals[ strip(v) ] = length(discVals)+1
         end
 
         w = length(discVals)
@@ -204,16 +210,20 @@ function arffShape(ds::Dataset, f::IO)
         isIntAttr = true
         try
           for T in discVals
-            assert(0 <= parseint(T[1]) <= w)
+            assert(0 < parseint(T[1]) <= w)
           end
         catch
           isIntAttr = false
         end
 
+        pEnd = shape.offsets[end]
+
+        push!(shape.ranges, (pEnd+1):(pEnd+w))
         push!(shape.isIntAttr, isIntAttr)
         push!(shape.levels, discVals)
-        push!(shape.offsets, shape.offsets[end]+w)
+        push!(shape.offsets, pEnd+w)
         push!(shape.widths, w)
+
 
       end
 
@@ -420,9 +430,10 @@ function parseArffRow(data::Dataset, line::ASCIIString, rowNum::Int64)
     k=1
 
     while k > 0
-      kNext = searchindex(line, ",", k+1)
-      kVal = (kNext == 0) ? line[k+1:end-1] : line[k+1:kNext-1]
+      kNext = searchindex(line, ",", k)
+      kVal = (kNext == 0) ? line[k:end-1] : line[k:kNext-1]
       typeid = data.shape.index[i]
+
       if i == data.shape.labelAttr
         if data.shape.isIntAttr[typeid]
           push!(row.labels, parseint(kVal))
@@ -430,11 +441,15 @@ function parseArffRow(data::Dataset, line::ASCIIString, rowNum::Int64)
           push!(row.labels, data.shape.levels[typeid][kVal])
         end
       else
-        push!(row.values, parseValue(data.shape, i, kVal, logMap))
+        push!(row.values, parseValue(data.shape, i, kVal, data.logMap))
+      end
+
+      if kNext == 0
+        break
       end
 
       i += 1
-      k = kNext
+      k = kNext+1
     end
 
   end
@@ -470,6 +485,7 @@ function arffIter(data::Dataset, stream::IO, closeOnEnd::Bool)
 end
 
 function eachrowTask(data::Dataset)
+                      try
   for fname in data.sources
     open(fname) do f
 
@@ -481,6 +497,14 @@ function eachrowTask(data::Dataset)
 
     end
   end
+                      catch e
+           io = IOBuffer()
+           Base.show_backtrace(io, catch_backtrace())
+           seekstart(io)
+           bt = readall(io)
+           println(STDERR, bt)
+                      exit(-1)
+                    end
 end
 
 function eachrow(data::Dataset)

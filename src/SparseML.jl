@@ -44,11 +44,7 @@ function train(modelType::MLModel, params::Common.Params, data::Data.Dataset)
 end
 
 function label(model::String, params::Common.Params, stream::Task)
-  @task label(load(model), params, stream)
-end
-
-function label(model::MLModel, params::Common.Params, stream::Task)
-  @task label(model, params, stream)
+  label(load(model), params, stream)
 end
 
 # VFDT

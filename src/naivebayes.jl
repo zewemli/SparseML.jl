@@ -10,13 +10,8 @@ import Distributions: Normal, pdf, logpdf
 
 # For NB we transform probabilities into log probabilities
 function getlogp(M::Probability, label::Int64, v::Data.DiscValue)
-  M.disc.conditional[ label, v.index ]
+  M.disc.conditional[ label, v.value ]
 end
-
-function getlogp(M::Probability, label::Int64, v::Data.DiscValue)
-  M.disc.conditional[ label, v.index ]
-end
-
 
 typealias SparseMat SparseMatrixCSC{Float64,Int64}
 
@@ -24,7 +19,7 @@ type Settings
   ignorePriors::Bool
 
   function Settings(params::Common.Params)
-    new( get(params, "ignorePriors", true) )
+    new( get(params, "ignorePriors", false) )
   end
 end
 
@@ -44,7 +39,6 @@ type NBPredModel
   pZero::Matrix{Float64}
   pLabel::Vector{Float64}
 
-
   function NBPredModel(nb::NB)
     NBPredModel(nb.counts, nb.settings.ignorePriors)
   end
@@ -61,18 +55,20 @@ type NBPredModel
     pB = ignorePriors ? zeros(shape.labels) : copy(p.label)
 
     for feature=1:(shape.discFeatures + shape.realFeatures)
+
       if shape.labelAttr != feature
         tID = shape.index[feature]
+
         if shape.isReal[feature]
 
           for label=1:shape.labels
-            pZ[label,tID] = logpdf(p.normal.conditional[label,tID], 0)
-            pB[ label ] += pZ[label,tID]
+            pZ[label, feature] = logpdf(p.normal.conditional[label,tID], 0)
+            pB[ label ] += pZ[label, feature]
           end
 
         else
 
-          frng = shape.offsets[tID]:(shape.offsets[tID+1]-1)
+          frng = shape.ranges[tID]
 
           for label=1:shape.labels
             z = 1
@@ -109,11 +105,11 @@ function train(model::NB, data::Data.Dataset)
   for row in Data.eachrow(data)
     Model.push!(row, model.counts)
   end
-
   return model
 end
 
 function label(model::NB, params::Common.Params, stream::Task)
+
 
   const produceRanks = get(params, "ranks", false)
 
@@ -140,7 +136,7 @@ function label(model::NBPredModel, row::Data.Row, produceRanks::Bool)
 
   for v in row.values
     for c=labelRng
-      p[c] += getlogp(model.p, c, v) - model.pZero[c, v.index]
+      p[c] += getlogp(model.p, c, v) - model.pZero[c, v.feature]
     end
   end
 
