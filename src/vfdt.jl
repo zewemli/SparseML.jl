@@ -89,11 +89,10 @@ typealias NodeQueue Collections.PriorityQueue{TreeNode, Float64}
 
 type Params
   ttl::Int64
+  pruneEvery::Int64
   delta::Float64
   tieLimit::Float64
-  k::Float64
   maxNodes::Int64
-  contractInterval::Int64
   quantiles::Vector{Float64}
   naivebayes::Bool
   ignorePriors::Bool
@@ -105,17 +104,16 @@ type Params
   function Params(params::Common.Params)
     G = eval( symbol( get(params,"measure","gain") ) ) # NOT USED
     new(
-      get(params, "ttl", 300),
-      get(params, "delta", 0.15),
+      get(params, "ttl", 500),
+      get(params, "pruneEvery", 50),
+      get(params, "delta", 0.1),
       get(params, "tieLimit", 0.05,),
-      get(params, "k", 2), # NOT USED
-      clamp(get(params, "maxNodes", 1024), 8, 65536), # Change this if you need...
-      get(params, "contractInterval", 1000),
-      get(params, "quantiles", [0.25,0.5,0.75]),
+      clamp(get(params, "maxNodes", 4096), 8, 65536), # Change this if you need...
+      get(params, "quantiles", [0.25,0.75]),
       get(params, "naivebayes", true,),
       get(params, "ignorePriors", true,),
       get(params, "iters", 3,),
-      get(params, "churn", 250,),
+      get(params, "churn", 1000,),
       get(params, "graphFile", "",),
       G )
   end
@@ -488,11 +486,14 @@ function updateLeaf(tree::HoeffdingTree,
     leaf.epsilon = epsilon
     leaf.bestG = bestG
 
-    if gradient > params.delta || gradient < params.tieLimit
+    if gradient > params.delta
       splitLeaf(tree, leaf, bestAttr, epsilon)
+      return true
     end
 
   end
+
+  return false
 end
 
 function updateLeaf(tree::HoeffdingTree, node::TreeNode, ttl::Float64, params::Params)
@@ -522,7 +523,9 @@ end
 # Training is simple
 function train(tree::HoeffdingTree, data::Data.Dataset)
 
+  ttl = float(tree.params.ttl)
   treeTooBig = false
+  updateCounter = 0
 
   for iterNum=1:tree.params.iters
 
@@ -538,26 +541,17 @@ function train(tree::HoeffdingTree, data::Data.Dataset)
       end
 
       leaf = countToLeaf!(tree, row)
-
-      if !treeTooBig && tree.size < tree.params.maxNodes
-
-        for v in row.values
-          push!(leaf.updatedAttrs, v.feature)
-        end
-
-        preSize = tree.size
-        updateLeaf(tree, leaf, tree.params.ttl + ttl_decay(row.num), tree.params)
-
-        if tree.size > tree.params.maxNodes
-          prune!(tree)
-          println(STDERR, "Sizes ",preSize,"/",tree.size," pre/post", )
-
-          if tree.size >= preSize
-            treeTooBig = true
-            break
-          end
-        end
+      for v in row.values
+        push!(leaf.updatedAttrs, v.feature)
       end
+
+      updateCounter += int(updateLeaf(tree, leaf, ttl, tree.params))
+
+      if updateCounter > tree.params.pruneEvery
+        prune!(tree)
+        updateCounter=0
+      end
+
     end
 
     println(STDERR, "Done with iter $(iterNum)")
